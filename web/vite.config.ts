@@ -58,6 +58,8 @@ export default defineConfig({
     },
   },
   server: {
+    host: '0.0.0.0',
+    allowedHosts: ['farm.deepfal.cn'],
     proxy: {
       '/socket.io': {
         target: 'http://localhost:3000',

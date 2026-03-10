@@ -50,6 +50,17 @@ const currentAccountName = computed(() => {
 })
 const allFertilizerLandTypes = ['gold', 'black', 'red', 'normal']
 
+const fertilizerBuyTypeOptions = [
+  { label: '仅有机化肥', value: 'organic' },
+  { label: '仅普通化肥', value: 'normal' },
+  { label: '两者都买', value: 'both' },
+]
+
+const fertilizerBuyModeOptions = [
+  { label: '容器不足时购买', value: 'threshold' },
+  { label: '无限购买', value: 'unlimited' },
+]
+
 const fertilizerLandTypeOptions = [
   { label: '金土地', value: 'gold' },
   { label: '黑土地', value: 'black' },
@@ -109,6 +120,10 @@ const localSettings = ref({
     email: false,
     fertilizer_gift: false,
     fertilizer_buy: false,
+    fertilizer_buy_type: 'organic' as string,
+    fertilizer_buy_max: 10,
+    fertilizer_buy_mode: 'threshold' as string,
+    fertilizer_buy_threshold: 100,
     free_gifts: false,
     share_reward: false,
     vip_gift: false,
@@ -313,6 +328,17 @@ const stealCropOptions = computed<StealCropOption[]>(() => {
     return a.plantId - b.plantId
   })
 })
+// unlimited + both 互斥：切到 unlimited 时自动重置为 organic
+watch(() => localSettings.value.automation.fertilizer_buy_mode, (mode) => {
+  if (mode === 'unlimited' && localSettings.value.automation.fertilizer_buy_type === 'both')
+    localSettings.value.automation.fertilizer_buy_type = 'organic'
+})
+// 切到 both 时若模式为 unlimited，自动重置为 threshold
+watch(() => localSettings.value.automation.fertilizer_buy_type, (type) => {
+  if (type === 'both' && localSettings.value.automation.fertilizer_buy_mode === 'unlimited')
+    localSettings.value.automation.fertilizer_buy_mode = 'threshold'
+})
+
 const stealBlacklistCount = computed(() => normalizeStealPlantBlacklist(localSettings.value.automation.friend_steal_blacklist).length)
 const stealBlacklistSet = computed(() => new Set(normalizeStealPlantBlacklist(localSettings.value.automation.friend_steal_blacklist)))
 
@@ -405,6 +431,10 @@ function syncLocalSettings() {
         email: false,
         fertilizer_gift: false,
         fertilizer_buy: false,
+        fertilizer_buy_type: 'organic' as string,
+        fertilizer_buy_max: 10,
+        fertilizer_buy_mode: 'threshold' as string,
+        fertilizer_buy_threshold: 100,
         free_gifts: false,
         share_reward: false,
         vip_gift: false,
@@ -436,6 +466,10 @@ function syncLocalSettings() {
         email: false,
         fertilizer_gift: false,
         fertilizer_buy: false,
+        fertilizer_buy_type: 'organic' as string,
+        fertilizer_buy_max: 10,
+        fertilizer_buy_mode: 'threshold' as string,
+        fertilizer_buy_threshold: 100,
         free_gifts: false,
         share_reward: false,
         vip_gift: false,
@@ -871,6 +905,44 @@ async function handleTestOffline() {
             <BaseSwitch v-model="localSettings.automation.fertilizer_buy" label="自动购买化肥" />
           </div>
 
+          <!-- 自动购买化肥子配置 -->
+          <div v-if="localSettings.automation.fertilizer_buy" class="border border-cyan-200 rounded bg-cyan-50/60 p-3 dark:border-cyan-800/60 dark:bg-cyan-900/10">
+            <div class="mb-2 text-sm text-cyan-800 font-medium dark:text-cyan-300">
+              购买化肥配置
+            </div>
+            <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <BaseSelect
+                v-model="localSettings.automation.fertilizer_buy_type"
+                label="购买种类"
+                :options="fertilizerBuyTypeOptions"
+              />
+              <BaseSelect
+                v-model="localSettings.automation.fertilizer_buy_mode"
+                label="购买条件"
+                :options="fertilizerBuyModeOptions"
+              />
+            </div>
+            <div class="grid grid-cols-1 mt-3 gap-3 md:grid-cols-2">
+              <BaseInput
+                v-model.number="localSettings.automation.fertilizer_buy_max"
+                label="本轮最多购买总数（个）"
+                type="number"
+                min="1"
+                max="10"
+              />
+              <BaseInput
+                v-if="localSettings.automation.fertilizer_buy_mode === 'threshold'"
+                v-model.number="localSettings.automation.fertilizer_buy_threshold"
+                label="容器低于此小时数时购买"
+                type="number"
+                min="0"
+              />
+            </div>
+            <p v-if="localSettings.automation.fertilizer_buy_mode === 'unlimited'" class="mt-2 text-xs text-amber-600 dark:text-amber-400">
+              无限购买模式下不能同时选择两种化肥
+            </p>
+          </div>
+
           <!-- Sub-controls -->
           <div class="flex flex-wrap gap-4 rounded bg-emerald-50 p-2 text-sm dark:bg-emerald-900/20" :class="{ 'opacity-50 pointer-events-none': farmDisabled }">
             <BaseSwitch v-model="localSettings.automation.farm_water" label="自动浇水" :disabled="farmDisabled" />
@@ -889,7 +961,7 @@ async function handleTestOffline() {
             <div class="border border-blue-200 rounded-lg bg-blue-50/70 p-3 text-gray-800 shadow-sm dark:border-blue-500/50 dark:bg-[#17243a] dark:text-white">
               <div class="mb-1 flex items-center justify-between gap-3">
                 <div class="min-w-0 flex items-center gap-2">
-                  <div class="h-9 w-9 flex items-center justify-center rounded-lg border border-blue-300/70 bg-white/90 dark:border-blue-500/40 dark:bg-blue-500/20">
+                  <div class="h-9 w-9 flex items-center justify-center border border-blue-300/70 rounded-lg bg-white/90 dark:border-blue-500/40 dark:bg-blue-500/20">
                     <div class="i-carbon-filter text-xl text-blue-700 dark:text-blue-200" />
                   </div>
                   <div class="min-w-0">
@@ -897,7 +969,7 @@ async function handleTestOffline() {
                       <div class="truncate text-base font-semibold">
                         排除作物
                       </div>
-                      <div class="rounded-full border border-blue-300 bg-white/95 px-2 py-0.5 text-xs text-blue-700 shadow-sm dark:border-blue-300/60 dark:bg-blue-500/15 dark:text-blue-100">
+                      <div class="border border-blue-300 rounded-full bg-white/95 px-2 py-0.5 text-xs text-blue-700 shadow-sm dark:border-blue-300/60 dark:bg-blue-500/15 dark:text-blue-100">
                         <span class="font-semibold">{{ stealBlacklistCount }} / {{ stealCropOptions.length }}</span>
                       </div>
                     </div>
@@ -908,7 +980,7 @@ async function handleTestOffline() {
                 </div>
                 <button
                   type="button"
-                  class="h-9 w-9 flex items-center justify-center rounded-lg border border-blue-300/70 bg-white/90 text-blue-700 transition hover:bg-blue-100 dark:border-blue-500/40 dark:bg-blue-500/20 dark:text-blue-100 dark:hover:bg-blue-500/30"
+                  class="h-9 w-9 flex items-center justify-center border border-blue-300/70 rounded-lg bg-white/90 text-blue-700 transition dark:border-blue-500/40 dark:bg-blue-500/20 hover:bg-blue-100 dark:text-blue-100 dark:hover:bg-blue-500/30"
                   :aria-expanded="!stealBlacklistCollapsed"
                   @click="stealBlacklistCollapsed = !stealBlacklistCollapsed"
                 >
@@ -930,7 +1002,7 @@ async function handleTestOffline() {
                     <BaseButton
                       variant="outline"
                       size="sm"
-                      class="!border-blue-300 !text-blue-700 hover:!bg-blue-100 dark:!border-blue-400/70 dark:!text-blue-100 dark:hover:!bg-blue-500/20"
+                      class="!border-blue-300 !text-blue-700 dark:!border-blue-400/70 hover:!bg-blue-100 dark:!text-blue-100 dark:hover:!bg-blue-500/20"
                       :disabled="stealBlacklistCount >= stealCropOptions.length"
                       @click="filterUnselectedStealCrops"
                     >
@@ -949,58 +1021,60 @@ async function handleTestOffline() {
                 </div>
 
                 <div class="relative mb-2">
-                  <div class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-base text-blue-500/70 dark:text-blue-200/70">
+                  <div class="pointer-events-none absolute left-3 top-1/2 text-base text-blue-500/70 -translate-y-1/2 dark:text-blue-200/70">
                     <div class="i-carbon-search" />
                   </div>
                   <input
                     v-model="stealBlacklistSearch"
                     type="text"
                     placeholder="搜索作物名或 Seed ID"
-                    class="w-full border border-blue-200 rounded-lg bg-white py-2 pl-9 pr-3 text-sm text-gray-700 outline-none placeholder:text-gray-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-300/20 dark:border-blue-400/40 dark:bg-[#1c2b45] dark:text-blue-50 dark:placeholder:text-blue-200/50 dark:focus:border-blue-300/70"
+                    class="w-full border border-blue-200 rounded-lg bg-white py-2 pl-9 pr-3 text-sm text-gray-700 outline-none dark:border-blue-400/40 focus:border-blue-400 dark:bg-[#1c2b45] dark:text-blue-50 placeholder:text-gray-400 focus:ring-2 focus:ring-blue-300/20 dark:focus:border-blue-300/70 dark:placeholder:text-blue-200/50"
                   >
                 </div>
 
-              <div v-if="stealCropOptions.length > 0">
-                <div
-                  v-if="filteredStealCropOptions.length > 0"
-                  class="max-h-56 grid grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3"
-                >
-                  <button
-                    v-for="crop in filteredStealCropOptions"
-                    :key="crop.plantId"
-                    type="button"
-                    class="flex w-full cursor-pointer items-center gap-2 rounded border bg-white px-2 py-1.5 text-left text-xs text-gray-700 transition dark:bg-gray-800 dark:text-gray-300"
-                    :class="isCropBlacklisted(crop.plantId)
-                      ? 'border-blue-500 ring-1 ring-blue-300/70 dark:border-blue-400 dark:ring-blue-700/50'
-                      : 'border-gray-200 hover:border-blue-300 dark:border-gray-700 dark:hover:border-blue-700'"
-                    :aria-pressed="isCropBlacklisted(crop.plantId)"
-                    @click="toggleStealBlacklistCrop(crop.plantId)"
+                <div v-if="stealCropOptions.length > 0">
+                  <div
+                    v-if="filteredStealCropOptions.length > 0"
+                    class="grid grid-cols-1 max-h-56 gap-2 overflow-y-auto pr-1 lg:grid-cols-3 sm:grid-cols-2"
                   >
-                    <img
-                      v-if="crop.image"
-                      :src="crop.image"
-                      :alt="crop.name"
-                      class="h-[1.8rem] w-[1.8rem] rounded object-cover"
+                    <button
+                      v-for="crop in filteredStealCropOptions"
+                      :key="crop.plantId"
+                      type="button"
+                      class="w-full flex cursor-pointer items-center gap-2 border rounded bg-white px-2 py-1.5 text-left text-xs text-gray-700 transition dark:bg-gray-800 dark:text-gray-300"
+                      :class="isCropBlacklisted(crop.plantId)
+                        ? 'border-blue-500 ring-1 ring-blue-300/70 dark:border-blue-400 dark:ring-blue-700/50'
+                        : 'border-gray-200 hover:border-blue-300 dark:border-gray-700 dark:hover:border-blue-700'"
+                      :aria-pressed="isCropBlacklisted(crop.plantId)"
+                      @click="toggleStealBlacklistCrop(crop.plantId)"
                     >
-                    <div v-else class="h-[1.8rem] w-[1.8rem] flex items-center justify-center rounded bg-gray-100 text-[10px] text-gray-500 dark:bg-gray-700 dark:text-gray-400">
-                      <div class="i-carbon-image" />
-                    </div>
-                    <div class="min-w-0 flex-1">
-                      <div class="truncate text-xs font-medium">{{ crop.name }}</div>
-                      <div class="text-[11px] text-gray-500 dark:text-gray-400">
-                        Seed ID: {{ crop.seedId === null ? '?' : crop.seedId }}   Lv.{{ crop.level === null ? '?' : crop.level }}
+                      <img
+                        v-if="crop.image"
+                        :src="crop.image"
+                        :alt="crop.name"
+                        class="h-[1.8rem] w-[1.8rem] rounded object-cover"
+                      >
+                      <div v-else class="h-[1.8rem] w-[1.8rem] flex items-center justify-center rounded bg-gray-100 text-[10px] text-gray-500 dark:bg-gray-700 dark:text-gray-400">
+                        <div class="i-carbon-image" />
                       </div>
-                    </div>
-                  </button>
+                      <div class="min-w-0 flex-1">
+                        <div class="truncate text-xs font-medium">
+                          {{ crop.name }}
+                        </div>
+                        <div class="text-[11px] text-gray-500 dark:text-gray-400">
+                          Seed ID: {{ crop.seedId === null ? '?' : crop.seedId }}   Lv.{{ crop.level === null ? '?' : crop.level }}
+                        </div>
+                      </div>
+                    </button>
+                  </div>
+                  <div v-else class="rounded bg-white px-2 py-2 text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+                    未找到匹配作物，请调整关键词后重试。
+                  </div>
                 </div>
                 <div v-else class="rounded bg-white px-2 py-2 text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400">
-                  未找到匹配作物，请调整关键词后重试。
+                  暂无可选作物，请先等待种子列表加载完成。
                 </div>
               </div>
-              <div v-else class="rounded bg-white px-2 py-2 text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400">
-                暂无可选作物，请先等待种子列表加载完成。
-              </div>
-            </div>
             </div>
             <div class="border border-amber-200 rounded bg-amber-50/60 p-3 dark:border-amber-800/60 dark:bg-amber-900/10">
               <div class="mb-2 text-sm text-amber-800 font-medium dark:text-amber-300">
