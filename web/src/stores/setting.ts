@@ -86,6 +86,8 @@ export interface SettingsState {
   qrLogin: QrLoginConfig
 }
 
+type AccountSettingsPayload = Pick<SettingsState, 'plantingStrategy' | 'preferredSeedId' | 'intervals' | 'friendQuietHours' | 'automation'>
+
 export const useSettingStore = defineStore('setting', () => {
   const settings = ref<SettingsState>({
     plantingStrategy: 'preferred',
@@ -151,7 +153,7 @@ export const useSettingStore = defineStore('setting', () => {
     }
   }
 
-  async function saveSettings(accountId: string, newSettings: SettingsState) {
+  async function saveSettings(accountId: string, newSettings: AccountSettingsPayload) {
     if (!accountId)
       return { ok: false, error: '未选择账号' }
     loading.value = true
