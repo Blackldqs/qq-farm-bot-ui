@@ -529,4 +529,8 @@ module.exports = {
     sellAllFruits,
     getBagItems,
     getCurrentTotalsFromBag,
+    getCurrentContainerHours: async () => {
+        const bagReply = await getBag();
+        return getContainerHoursFromBagItems(getBagItems(bagReply));
+    },
 };
