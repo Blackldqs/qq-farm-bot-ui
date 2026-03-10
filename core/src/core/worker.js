@@ -12,7 +12,7 @@ const { checkFarm, startFarmCheckLoop, stopFarmCheckLoop, refreshFarmCheckLoop, 
 const { checkFriends, startFriendCheckLoop, stopFriendCheckLoop, refreshFriendCheckLoop, getFriendsList, getFriendLandsDetail, doFriendOperation } = require('../services/friend');
 const { getInteractRecords } = require('../services/interact');
 const { processInviteCodes } = require('../services/invite');
-const { autoBuyOrganicFertilizer, logMallGoodsList, buyFreeGifts, getFreeGiftDailyState } = require('../services/mall');
+const { autoBuyOrganicFertilizer, buyFreeGifts, getFreeGiftDailyState } = require('../services/mall');
 const { performDailyMonthCardGift, getMonthCardDailyState } = require('../services/monthcard');
 const { performDailyOpenServerGift, getOpenServerDailyState } = require('../services/openserver');
 const { performDailyVipGift, getVipDailyState } = require('../services/qqvip');
@@ -514,7 +514,6 @@ async function startBot(config) {
 
         // 登录成功后启动各模块
         await processInviteCodes();
-        logMallGoodsList().catch(() => null);
         if (getAutomation().fertilizer_gift) {
             await openFertilizerGiftPacksSilently().catch(() => 0);
         }
