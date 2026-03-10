@@ -452,6 +452,15 @@ const bagPrioritySeedOptions = computed(() => sortBagSeedsForDisplay(
 ))
 const bagSeedOrderIds = computed(() => bagPrioritySeedOptions.value.map(seed => seed.seedId))
 const skippedBagSeedCount = computed(() => bagSeeds.value.filter(seed => seed.count > 0 && seed.plantSize !== 1).length)
+const draggingBagSeedId = ref<number | null>(null)
+const dropTargetBagSeedId = ref<number | null>(null)
+
+function applyBagSeedOrder(nextOrder: number[]) {
+  const visibleSeedIdSet = new Set(nextOrder)
+  const hiddenSeedIds = normalizeBagSeedPriority(localSettings.value.bagSeedPriority)
+    .filter(id => !visibleSeedIdSet.has(id))
+  localSettings.value.bagSeedPriority = [...nextOrder, ...hiddenSeedIds]
+}
 
 function resetBagSeedState() {
   bagSeedsRequestSerial += 1
@@ -539,18 +548,60 @@ function moveBagSeed(seedId: number, direction: -1 | 1) {
   const targetSeedId = nextOrder[targetIndex]!
   nextOrder[index] = targetSeedId
   nextOrder[targetIndex] = currentSeedId
-  const visibleSeedIdSet = new Set(nextOrder)
-  const hiddenSeedIds = normalizeBagSeedPriority(localSettings.value.bagSeedPriority)
-    .filter(id => !visibleSeedIdSet.has(id))
-  localSettings.value.bagSeedPriority = [...nextOrder, ...hiddenSeedIds]
+  applyBagSeedOrder(nextOrder)
 }
 
 function resetBagSeedPriority() {
   const nextOrder = getDefaultBagSeedPriority(bagPrioritySeedSource.value)
-  const visibleSeedIdSet = new Set(nextOrder)
-  const hiddenSeedIds = normalizeBagSeedPriority(localSettings.value.bagSeedPriority)
-    .filter(id => !visibleSeedIdSet.has(id))
-  localSettings.value.bagSeedPriority = [...nextOrder, ...hiddenSeedIds]
+  applyBagSeedOrder(nextOrder)
+}
+
+function startBagSeedDrag(seedId: number, event: DragEvent) {
+  draggingBagSeedId.value = seedId
+  dropTargetBagSeedId.value = seedId
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(seedId))
+  }
+}
+
+function dragOverBagSeed(seedId: number, event: DragEvent) {
+  if (draggingBagSeedId.value === null)
+    return
+  event.preventDefault()
+  dropTargetBagSeedId.value = seedId
+  if (event.dataTransfer)
+    event.dataTransfer.dropEffect = 'move'
+}
+
+function dropBagSeed(seedId: number, event: DragEvent) {
+  event.preventDefault()
+  const sourceSeedId = draggingBagSeedId.value
+    ?? Number.parseInt(event.dataTransfer?.getData('text/plain') || '', 10)
+  if (!Number.isFinite(sourceSeedId) || sourceSeedId <= 0 || sourceSeedId === seedId) {
+    endBagSeedDrag()
+    return
+  }
+
+  const nextOrder = [...bagSeedOrderIds.value]
+  const sourceIndex = nextOrder.findIndex(id => id === sourceSeedId)
+  const targetIndex = nextOrder.findIndex(id => id === seedId)
+  if (sourceIndex < 0 || targetIndex < 0) {
+    endBagSeedDrag()
+    return
+  }
+
+  const movedSeedId = nextOrder[sourceIndex]!
+  nextOrder.splice(sourceIndex, 1)
+  const nextTargetIndex = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex
+  nextOrder.splice(nextTargetIndex, 0, movedSeedId)
+  applyBagSeedOrder(nextOrder)
+  endBagSeedDrag()
+}
+
+function endBagSeedDrag() {
+  draggingBagSeedId.value = null
+  dropTargetBagSeedId.value = null
 }
 
 const localOffline = ref({
@@ -1130,11 +1181,35 @@ async function handleTestOffline() {
               <div
                 v-for="(seed, index) in bagPrioritySeedOptions"
                 :key="seed.seedId"
-                class="flex flex-wrap items-center justify-between gap-3 border border-amber-200 rounded-lg bg-white/90 px-3 py-3 dark:border-amber-800/60 dark:bg-gray-800/70"
+                class="flex flex-wrap cursor-move items-center justify-between gap-3 border border-amber-200 rounded-lg bg-white/90 px-3 py-3 transition-colors dark:border-amber-800/60 dark:bg-gray-800/70"
+                :class="{
+                  'border-amber-400 bg-amber-100/70 dark:border-amber-500 dark:bg-amber-900/20': dropTargetBagSeedId === seed.seedId,
+                  'opacity-60': draggingBagSeedId === seed.seedId,
+                }"
+                draggable="true"
+                @dragstart="startBagSeedDrag(seed.seedId, $event)"
+                @dragover="dragOverBagSeed(seed.seedId, $event)"
+                @drop="dropBagSeed(seed.seedId, $event)"
+                @dragend="endBagSeedDrag"
               >
                 <div class="min-w-0 flex items-center gap-3">
+                  <div class="h-8 w-8 flex shrink-0 items-center justify-center rounded-lg bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-200">
+                    ≡
+                  </div>
                   <div class="h-8 w-8 flex shrink-0 items-center justify-center rounded-full bg-amber-100 text-sm text-amber-800 font-semibold dark:bg-amber-500/20 dark:text-amber-200">
                     {{ index + 1 }}
+                  </div>
+                  <img
+                    v-if="seed.image"
+                    :src="seed.image"
+                    :alt="seed.name"
+                    class="h-10 w-10 shrink-0 rounded-lg object-cover ring-1 ring-amber-200 dark:ring-amber-700/60"
+                  >
+                  <div
+                    v-else
+                    class="h-10 w-10 flex shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-400 dark:bg-gray-700 dark:text-gray-500"
+                  >
+                    <div class="i-carbon-image" />
                   </div>
                   <div class="min-w-0">
                     <div class="truncate text-sm text-gray-900 font-medium dark:text-gray-100">
