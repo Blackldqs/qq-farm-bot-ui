@@ -104,6 +104,22 @@ function createRuntimeEngine(options = {}) {
       store.setKnownFriendGids(id, merged)
       return true
     },
+    replaceKnownFriendGids: (accountId, gids) => {
+      const id = String(accountId || '').trim()
+      if (!id || !store.getKnownFriendGids || !store.setKnownFriendGids)
+        return false
+
+      const current = store.getKnownFriendGids(id)
+      const currentList = Array.isArray(current) ? current : []
+      const nextList = Array.isArray(gids)
+        ? gids.map(Number).filter(gid => Number.isFinite(gid) && gid > 0)
+        : []
+      if (nextList.length === currentList.length && nextList.every((gid, index) => gid === currentList[index]))
+        return false
+
+      store.setKnownFriendGids(id, nextList)
+      return true
+    },
     removeKnownFriendGid: (accountId, gid) => {
       const id = String(accountId || '').trim()
       const friendGid = Number(gid)
@@ -116,6 +132,33 @@ function createRuntimeEngine(options = {}) {
         return false
 
       store.setKnownFriendGids(id, currentList.filter(item => item !== friendGid))
+      return true
+    },
+    replaceSyncAllOpenIds: (accountId, openIds) => {
+      const id = String(accountId || '').trim()
+      if (!id || !store.getSyncAllOpenIds || !store.setSyncAllOpenIds || !store.getSyncAllImportState)
+        return false
+
+      const current = store.getSyncAllOpenIds(id)
+      const currentList = Array.isArray(current) ? current : []
+      const nextList = Array.isArray(openIds)
+        ? openIds.map(item => String(item || '').trim().toUpperCase()).filter(Boolean)
+        : []
+      if (nextList.length === currentList.length && nextList.every((item, index) => item === currentList[index]))
+        return false
+
+      const importState = store.getSyncAllImportState(id)
+      store.setSyncAllOpenIds(id, nextList, {
+        importedAt: Number(importState && importState.importedAt) || Date.now(),
+        resetSyncStatus: false,
+      })
+      return true
+    },
+    updateSyncAllLastSyncResult: (accountId, friendCount, syncedAt) => {
+      const id = String(accountId || '').trim()
+      if (!id || !store.setSyncAllLastSyncResult)
+        return false
+      store.setSyncAllLastSyncResult(id, friendCount, syncedAt)
       return true
     },
     broadcastConfigToWorkers,

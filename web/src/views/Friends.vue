@@ -6,6 +6,8 @@ import ConfirmModal from '@/components/ConfirmModal.vue'
 import LandCard from '@/components/LandCard.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
+import BaseSwitch from '@/components/ui/BaseSwitch.vue'
+import BaseTextarea from '@/components/ui/BaseTextarea.vue'
 import { useAccountStore } from '@/stores/account'
 import { useFriendStore } from '@/stores/friend'
 import { useStatusStore } from '@/stores/status'
@@ -27,8 +29,13 @@ const {
   interactError,
   knownFriendGids,
   knownFriendGidSyncCooldownSec,
+  autoRemoveNpcFarmers,
   knownFriendSettingsLoading,
   knownFriendSettingsSaving,
+  syncAllImportStatus,
+  syncAllImportLoading,
+  syncAllImportSaving,
+  syncAllImportResult,
 } = storeToRefs(friendStore)
 const { status, loading: statusLoading, realtimeConnected } = storeToRefs(statusStore)
 
@@ -41,6 +48,7 @@ const avatarErrorKeys = ref<Set<string>>(new Set())
 const searchKeyword = ref('')
 const blacklistCollapsed = ref(true)
 const interactCollapsed = ref(true)
+const qqSyncCollapsed = ref(true)
 const interactFilter = ref('all')
 const interactFilters = [
   { key: 'all', label: '全部' },
@@ -50,10 +58,13 @@ const interactFilters = [
 ]
 const newKnownFriendGid = ref<number | string>('')
 const localKnownFriendGidSyncCooldownSec = ref(600)
+const localAutoRemoveNpcFarmers = ref(false)
+const syncAllHexInput = ref('')
 const currentAccountPlatform = computed(() => String(currentAccount.value?.platform || '').trim().toLowerCase())
 const isQqAccount = computed(() => currentAccountPlatform.value === 'qq')
 const knownFriendGidCount = computed(() => knownFriendGids.value.length)
 const knownFriendGidSet = computed(() => new Set(knownFriendGids.value.map(gid => Number(gid)).filter(gid => gid > 0)))
+const hasImportedSyncAllOpenIds = computed(() => Number(syncAllImportStatus.value.openIdCount || 0) > 0)
 
 function normalizeKnownFriendGidSyncCooldownSec(input: unknown, fallback = 600) {
   const value = Number.parseInt(String(input ?? ''), 10)
@@ -114,10 +125,16 @@ async function loadFriends() {
     if (!acc)
       return
 
-    if (isQqAccount.value)
-      await friendStore.fetchKnownFriendSettings(currentAccountId.value)
-    else
+    if (isQqAccount.value) {
+      await Promise.all([
+        friendStore.fetchKnownFriendSettings(currentAccountId.value),
+        friendStore.fetchSyncAllImportStatus(currentAccountId.value),
+      ])
+    }
+    else {
       friendStore.clearKnownFriendSettings()
+      friendStore.clearSyncAllImportStatus()
+    }
 
     if (!realtimeConnected.value) {
       await statusStore.fetchStatus(currentAccountId.value)
@@ -125,9 +142,11 @@ async function loadFriends() {
 
     if (acc.running && status.value?.connection?.connected) {
       avatarErrorKeys.value.clear()
-      friendStore.fetchFriends(currentAccountId.value)
-      friendStore.fetchBlacklist(currentAccountId.value)
-      friendStore.fetchInteractRecords(currentAccountId.value)
+      await Promise.all([
+        friendStore.fetchFriends(currentAccountId.value),
+        friendStore.fetchBlacklist(currentAccountId.value),
+        friendStore.fetchInteractRecords(currentAccountId.value),
+      ])
     }
   }
 }
@@ -151,11 +170,32 @@ watch([currentAccountId, () => currentAccount.value?.platform], () => {
   loadFriends()
 })
 
+watch(
+  [
+    currentAccountId,
+    () => !!currentAccount.value?.running,
+    () => !!status.value?.connection?.connected,
+  ],
+  ([accountId, running, connected], [prevAccountId, prevRunning, prevConnected]) => {
+    if (!accountId || !running || !connected)
+      return
+
+    if (accountId === prevAccountId && running === prevRunning && connected === prevConnected)
+      return
+
+    loadFriends()
+  },
+)
+
 watch(knownFriendGidSyncCooldownSec, () => {
   localKnownFriendGidSyncCooldownSec.value = normalizeKnownFriendGidSyncCooldownSec(
     knownFriendGidSyncCooldownSec.value,
     600,
   )
+}, { immediate: true })
+
+watch(autoRemoveNpcFarmers, () => {
+  localAutoRemoveNpcFarmers.value = !!autoRemoveNpcFarmers.value
 }, { immediate: true })
 
 function toggleFriend(friendId: string) {
@@ -261,6 +301,12 @@ async function refreshKnownFriendSettings() {
   await friendStore.fetchKnownFriendSettings(currentAccountId.value)
 }
 
+async function refreshSyncAllImportStatus() {
+  if (!currentAccountId.value || !isQqAccount.value)
+    return
+  await friendStore.fetchSyncAllImportStatus(currentAccountId.value)
+}
+
 async function refreshFriendsAfterKnownGidChange() {
   if (!currentAccountId.value || !currentAccount.value?.running || !status.value?.connection?.connected)
     return
@@ -271,10 +317,15 @@ async function handleSaveKnownFriendSettings() {
   if (!currentAccountId.value || !isQqAccount.value)
     return
   const cooldownSec = normalizeKnownFriendGidSyncCooldownSec(localKnownFriendGidSyncCooldownSec.value)
+  const wasAutoRemoveNpcFarmers = !!autoRemoveNpcFarmers.value
   await friendStore.saveKnownFriendSettings(currentAccountId.value, {
     knownFriendGidSyncCooldownSec: cooldownSec,
+    autoRemoveNpcFarmers: localAutoRemoveNpcFarmers.value,
   })
-  toastStore.success('已保存同步冷却时间')
+  if (localAutoRemoveNpcFarmers.value && !wasAutoRemoveNpcFarmers) {
+    await refreshFriendsAfterKnownGidChange()
+  }
+  toastStore.success('已保存同步设置')
 }
 
 async function handleAddKnownFriendGid() {
@@ -292,6 +343,32 @@ async function handleAddKnownFriendGid() {
   newKnownFriendGid.value = ''
   await refreshFriendsAfterKnownGidChange()
   toastStore.success(`已加入同步列表: ${gid}`)
+}
+
+async function handleImportSyncAllHex() {
+  if (!currentAccountId.value || !isQqAccount.value)
+    return
+
+  const hex = String(syncAllHexInput.value || '').trim()
+  if (!hex) {
+    toastStore.error('请先粘贴 SyncAll 请求包十六进制')
+    return
+  }
+
+  const result = await friendStore.importSyncAllHex(currentAccountId.value, hex)
+  syncAllHexInput.value = ''
+  await Promise.all([
+    friendStore.fetchKnownFriendSettings(currentAccountId.value),
+    friendStore.fetchSyncAllImportStatus(currentAccountId.value),
+  ])
+  await refreshFriendsAfterKnownGidChange()
+
+  const openIdCount = Number(result?.parsed?.openIdCount || result?.data?.openIdCount || 0)
+  const friendCount = Number(result?.resultSummary?.currentFriendCount || 0)
+  if (friendCount > 0)
+    toastStore.success(`已导入 ${openIdCount} 个 OpenID，当前好友 ${friendCount} 人`)
+  else
+    toastStore.success(`已导入 ${openIdCount} 个 OpenID`)
 }
 
 function handleRemoveKnownFriendGid(friend: any, e: Event) {
@@ -392,6 +469,22 @@ function formatInteractTime(timestamp: number) {
     hour12: false,
   })
 }
+
+function formatSyncAllImportTime(timestamp: number) {
+  const ts = Number(timestamp) || 0
+  if (!ts)
+    return '未记录'
+
+  return new Date(ts).toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
+}
 </script>
 
 <template>
@@ -418,71 +511,6 @@ function formatInteractTime(timestamp: number) {
           class="w-full border border-gray-200 rounded-lg bg-white py-2 pl-10 pr-3 text-sm outline-none transition dark:border-gray-700 focus:border-blue-400 dark:bg-gray-800"
           placeholder="搜索好友昵称 / GID / UIN"
         >
-      </div>
-    </div>
-
-    <div v-if="currentAccountId && isQqAccount" class="mb-6 border border-amber-200 rounded-lg bg-white p-4 shadow dark:border-amber-700/60 dark:bg-gray-800">
-      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <div class="flex items-center gap-2">
-            <div class="i-carbon-user-profile text-lg text-amber-500" />
-            <h3 class="text-lg text-gray-700 font-semibold dark:text-gray-200">
-              QQ 好友自动同步
-            </h3>
-            <span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
-              {{ knownFriendGidCount }}
-            </span>
-          </div>
-          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            QQ 新好友接口依赖已知 GID。系统会自动从最近访客补充，进入好友农场明确失败时自动移除失效 GID。
-          </p>
-        </div>
-        <div class="flex items-center gap-2">
-          <BaseButton
-            variant="outline"
-            size="sm"
-            :loading="knownFriendSettingsLoading"
-            @click="refreshKnownFriendSettings"
-          >
-            刷新
-          </BaseButton>
-          <BaseButton
-            variant="primary"
-            size="sm"
-            :loading="knownFriendSettingsSaving"
-            @click="handleSaveKnownFriendSettings"
-          >
-            保存冷却时间
-          </BaseButton>
-        </div>
-      </div>
-
-      <div class="grid mt-4 gap-3 lg:grid-cols-[minmax(0,1fr)_220px_auto]">
-        <BaseInput
-          v-model="newKnownFriendGid"
-          type="number"
-          label="新增 GID"
-          placeholder="输入好友 GID"
-        />
-        <BaseInput
-          v-model.number="localKnownFriendGidSyncCooldownSec"
-          type="number"
-          label="访客检测入库冷却(秒)"
-          placeholder="600"
-        />
-        <div class="flex items-end">
-          <BaseButton
-            variant="success"
-            class="w-full lg:w-auto"
-            :loading="knownFriendSettingsSaving"
-            @click="handleAddKnownFriendGid"
-          >
-            新增 GID
-          </BaseButton>
-        </div>
-      </div>
-      <div class="mt-3 rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-500 dark:bg-gray-900/40 dark:text-gray-400">
-        已识别到的好友请直接看下面好友列表；若要临时移出维护列表，请在好友操作里点“移出同步列表”。
       </div>
     </div>
 
@@ -578,6 +606,225 @@ function formatInteractTime(timestamp: number) {
 
         <div v-if="filteredInteractRecords.length > visibleInteractRecords.length" class="text-center text-xs text-gray-400">
           仅展示最近 {{ visibleInteractRecords.length }} 条
+        </div>
+      </div>
+    </div>
+
+    <div v-if="currentAccountId && isQqAccount" class="mb-6 overflow-hidden border border-amber-200 rounded-lg bg-white shadow dark:border-amber-700/60 dark:bg-gray-800">
+      <div
+        class="flex flex-col cursor-pointer gap-3 p-4 transition lg:flex-row lg:items-start lg:justify-between hover:bg-amber-50/50 dark:hover:bg-amber-900/10"
+        @click="qqSyncCollapsed = !qqSyncCollapsed"
+      >
+        <div>
+          <div class="flex flex-wrap items-center gap-2">
+            <div
+              class="text-lg text-gray-400 transition-transform"
+              :class="qqSyncCollapsed ? 'i-carbon-chevron-right' : 'i-carbon-chevron-down'"
+            />
+            <div class="i-carbon-user-profile text-lg text-amber-500" />
+            <h3 class="text-lg text-gray-700 font-semibold dark:text-gray-200">
+              QQ 好友自动同步
+            </h3>
+            <span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+              已知 GID {{ knownFriendGidCount }}
+            </span>
+            <span
+              class="rounded-full px-2 py-0.5 text-xs"
+              :class="hasImportedSyncAllOpenIds
+                ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
+                : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300'"
+            >
+              {{ hasImportedSyncAllOpenIds ? `OpenID ${syncAllImportStatus.openIdCount}` : '未导入 SyncAll' }}
+            </span>
+          </div>
+          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+            QQ 新好友接口依赖已知 GID 和可选的 SyncAll 导入数据。默认收起，展开后再维护。
+          </p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400" @click.stop>
+          <span class="rounded-full bg-gray-100 px-2 py-1 dark:bg-gray-700">
+            冷却 {{ localKnownFriendGidSyncCooldownSec }} 秒
+          </span>
+          <span class="rounded-full bg-gray-100 px-2 py-1 dark:bg-gray-700">
+            NPC 清理 {{ localAutoRemoveNpcFarmers ? '开启' : '关闭' }}
+          </span>
+          <BaseButton
+            variant="outline"
+            size="sm"
+            @click="qqSyncCollapsed = !qqSyncCollapsed"
+          >
+            {{ qqSyncCollapsed ? '展开设置' : '收起设置' }}
+          </BaseButton>
+        </div>
+      </div>
+
+      <div v-show="!qqSyncCollapsed" class="border-t border-amber-100 p-4 dark:border-amber-800/40">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <p class="text-sm text-gray-500 dark:text-gray-400">
+              系统会自动从最近访客补充 GID，进入好友农场明确失败时自动移除失效 GID。
+            </p>
+          </div>
+          <div class="flex items-center gap-2">
+            <BaseButton
+              variant="outline"
+              size="sm"
+              :loading="knownFriendSettingsLoading"
+              @click="refreshKnownFriendSettings"
+            >
+              刷新
+            </BaseButton>
+            <BaseButton
+              variant="primary"
+              size="sm"
+              :loading="knownFriendSettingsSaving"
+              @click="handleSaveKnownFriendSettings"
+            >
+              保存同步设置
+            </BaseButton>
+          </div>
+        </div>
+
+        <div class="grid mt-4 gap-3 lg:grid-cols-[minmax(0,1fr)_220px_auto]">
+          <BaseInput
+            v-model="newKnownFriendGid"
+            type="number"
+            label="新增 GID"
+            placeholder="输入好友 GID"
+          />
+          <BaseInput
+            v-model.number="localKnownFriendGidSyncCooldownSec"
+            type="number"
+            label="访客检测入库冷却(秒)"
+            placeholder="600"
+          />
+          <div class="flex items-end">
+            <BaseButton
+              variant="success"
+              class="w-full lg:w-auto"
+              :loading="knownFriendSettingsSaving"
+              @click="handleAddKnownFriendGid"
+            >
+              新增 GID
+            </BaseButton>
+          </div>
+        </div>
+        <div class="mt-4 rounded-lg bg-gray-50 p-3 dark:bg-gray-900/40">
+          <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div class="text-sm text-gray-700 font-medium dark:text-gray-200">
+                自动删除 1 级小小农夫
+              </div>
+              <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                开启后会立即执行一次，并在最近访客同步周期内持续清理这类 NPC。
+              </div>
+            </div>
+            <BaseSwitch v-model="localAutoRemoveNpcFarmers" />
+          </div>
+        </div>
+        <div class="mt-3 rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-500 dark:bg-gray-900/40 dark:text-gray-400">
+          已识别到的好友请直接看下面好友列表；若要临时移出维护列表，请在好友操作里点“移出同步列表”。
+        </div>
+
+        <div class="mt-4 border border-amber-200 rounded-lg border-dashed p-4 dark:border-amber-700/40">
+          <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div class="flex items-center gap-2">
+                <div class="i-carbon-document-import text-lg text-amber-500" />
+                <h4 class="text-base text-gray-700 font-semibold dark:text-gray-200">
+                  导入 SyncAll 请求包
+                </h4>
+                <span
+                  class="rounded-full px-2 py-0.5 text-xs"
+                  :class="hasImportedSyncAllOpenIds
+                    ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
+                    : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300'"
+                >
+                  {{ hasImportedSyncAllOpenIds ? `已导入 ${syncAllImportStatus.openIdCount}` : '未导入' }}
+                </span>
+              </div>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                粘贴手机抓到的 `FriendService.SyncAll` 请求包十六进制。系统会按当前账号解析 OpenID 列表，并优先用它同步全量好友。
+              </p>
+            </div>
+            <div class="flex items-center gap-2">
+              <BaseButton
+                variant="outline"
+                size="sm"
+                :loading="syncAllImportLoading"
+                @click="refreshSyncAllImportStatus"
+              >
+                刷新状态
+              </BaseButton>
+              <BaseButton
+                variant="primary"
+                size="sm"
+                :loading="syncAllImportSaving"
+                @click="handleImportSyncAllHex"
+              >
+                导入并同步
+              </BaseButton>
+            </div>
+          </div>
+
+          <div class="grid mt-4 gap-3 lg:grid-cols-4 sm:grid-cols-2">
+            <div class="rounded-lg bg-gray-50 px-3 py-3 dark:bg-gray-900/40">
+              <div class="text-xs text-gray-400">
+                已导入 OpenID
+              </div>
+              <div class="mt-1 text-lg text-gray-800 font-semibold dark:text-gray-100">
+                {{ syncAllImportStatus.openIdCount || 0 }}
+              </div>
+            </div>
+            <div class="rounded-lg bg-gray-50 px-3 py-3 dark:bg-gray-900/40">
+              <div class="text-xs text-gray-400">
+                上次导入时间
+              </div>
+              <div class="mt-1 text-sm text-gray-700 font-medium dark:text-gray-200">
+                {{ formatSyncAllImportTime(syncAllImportStatus.importedAt) }}
+              </div>
+            </div>
+            <div class="rounded-lg bg-gray-50 px-3 py-3 dark:bg-gray-900/40">
+              <div class="text-xs text-gray-400">
+                上次同步时间
+              </div>
+              <div class="mt-1 text-sm text-gray-700 font-medium dark:text-gray-200">
+                {{ formatSyncAllImportTime(syncAllImportStatus.lastSyncAt) }}
+              </div>
+            </div>
+            <div class="rounded-lg bg-gray-50 px-3 py-3 dark:bg-gray-900/40">
+              <div class="text-xs text-gray-400">
+                上次同步好友数
+              </div>
+              <div class="mt-1 text-lg text-gray-800 font-semibold dark:text-gray-100">
+                {{ syncAllImportStatus.lastSyncFriendCount || 0 }}
+              </div>
+            </div>
+          </div>
+
+          <div
+            v-if="syncAllImportResult"
+            class="mt-4 rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700 dark:bg-green-900/20 dark:text-green-300"
+          >
+            导入结果：获取到 {{ syncAllImportResult.fetchedFriendCount }} 个好友信息，
+            其中 {{ syncAllImportResult.npcFriendCount }} 个 1 级小小农夫，
+            {{ syncAllImportResult.existingFriendCount }} 个好友信息已存在，
+            当前好友数量 {{ syncAllImportResult.currentFriendCount }}。
+          </div>
+
+          <div class="mt-4">
+            <BaseTextarea
+              v-model="syncAllHexInput"
+              :rows="4"
+              label="SyncAll 请求包十六进制"
+              placeholder="粘贴类似 send_hex.txt 的十六进制文本，允许包含空格和换行"
+              :disabled="syncAllImportSaving"
+            />
+          </div>
+
+          <div class="mt-3 rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-500 dark:bg-gray-900/40 dark:text-gray-400">
+            导入只和当前账号绑定。若小程序好友发生变化，需要重新导入新的请求包以刷新 OpenID 列表。
+          </div>
         </div>
       </div>
     </div>

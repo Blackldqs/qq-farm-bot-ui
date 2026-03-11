@@ -41,6 +41,34 @@ const DEFAULT_QR_LOGIN = {
     apiDomain: 'q.qq.com',
 };
 
+function normalizeSyncAllOpenIds(input, fallback = []) {
+    const source = Array.isArray(input) ? input : fallback;
+    const normalized = [];
+    const seen = new Set();
+    for (const item of source) {
+        const value = String(item || '').trim().toUpperCase();
+        if (!value) continue;
+        if (value.length > 128) continue;
+        if (!/^[0-9A-Z_-]+$/.test(value)) continue;
+        if (seen.has(value)) continue;
+        seen.add(value);
+        normalized.push(value);
+    }
+    return normalized;
+}
+
+function normalizeSnapshotTimestamp(input, fallback = 0) {
+    const value = Number.parseInt(input, 10);
+    const base = Number.isFinite(value) ? value : fallback;
+    return Math.max(0, base);
+}
+
+function normalizeSnapshotCount(input, fallback = 0) {
+    const value = Number.parseInt(input, 10);
+    const base = Number.isFinite(value) ? value : fallback;
+    return Math.max(0, base);
+}
+
 function normalizeKnownFriendGids(input, fallback = []) {
     const source = Array.isArray(input) ? input : fallback;
     const normalized = [];
@@ -124,6 +152,11 @@ const DEFAULT_ACCOUNT_CONFIG = {
     knownFriendGids: [],
     knownFriendGidSyncCooldownSec: DEFAULT_KNOWN_FRIEND_GID_SYNC_COOLDOWN_SEC,
     friendBlacklist: [],
+    autoRemoveNpcFarmers: false,
+    syncAllOpenIds: [],
+    syncAllImportedAt: 0,
+    syncAllLastSyncAt: 0,
+    syncAllLastSyncFriendCount: 0,
 };
 const ALLOWED_AUTOMATION_KEYS = new Set(Object.keys(DEFAULT_ACCOUNT_CONFIG.automation));
 
@@ -410,6 +443,11 @@ function cloneAccountConfig(base = DEFAULT_ACCOUNT_CONFIG) {
         knownFriendGids: normalizeKnownFriendGids(base.knownFriendGids),
         knownFriendGidSyncCooldownSec: normalizeKnownFriendGidSyncCooldownSec(base.knownFriendGidSyncCooldownSec),
         friendBlacklist: rawBlacklist.map(Number).filter(n => Number.isFinite(n) && n > 0),
+        autoRemoveNpcFarmers: !!base.autoRemoveNpcFarmers,
+        syncAllOpenIds: normalizeSyncAllOpenIds(base.syncAllOpenIds),
+        syncAllImportedAt: normalizeSnapshotTimestamp(base.syncAllImportedAt),
+        syncAllLastSyncAt: normalizeSnapshotTimestamp(base.syncAllLastSyncAt),
+        syncAllLastSyncFriendCount: normalizeSnapshotCount(base.syncAllLastSyncFriendCount),
         plantingStrategy: ALLOWED_PLANTING_STRATEGIES.includes(String(base.plantingStrategy || ''))
             ? String(base.plantingStrategy)
             : DEFAULT_ACCOUNT_CONFIG.plantingStrategy,
@@ -505,6 +543,29 @@ function normalizeAccountConfig(input, fallback = accountFallbackConfig) {
 
     if (Array.isArray(src.friendBlacklist)) {
         cfg.friendBlacklist = src.friendBlacklist.map(Number).filter(n => Number.isFinite(n) && n > 0);
+    }
+
+    if (src.autoRemoveNpcFarmers !== undefined) {
+        cfg.autoRemoveNpcFarmers = !!src.autoRemoveNpcFarmers;
+    }
+
+    if (src.syncAllOpenIds !== undefined) {
+        cfg.syncAllOpenIds = normalizeSyncAllOpenIds(src.syncAllOpenIds, cfg.syncAllOpenIds);
+    }
+
+    if (src.syncAllImportedAt !== undefined) {
+        cfg.syncAllImportedAt = normalizeSnapshotTimestamp(src.syncAllImportedAt, cfg.syncAllImportedAt);
+    }
+
+    if (src.syncAllLastSyncAt !== undefined) {
+        cfg.syncAllLastSyncAt = normalizeSnapshotTimestamp(src.syncAllLastSyncAt, cfg.syncAllLastSyncAt);
+    }
+
+    if (src.syncAllLastSyncFriendCount !== undefined) {
+        cfg.syncAllLastSyncFriendCount = normalizeSnapshotCount(
+            src.syncAllLastSyncFriendCount,
+            cfg.syncAllLastSyncFriendCount,
+        );
     }
 
     return cfg;
@@ -682,6 +743,11 @@ function getConfigSnapshot(accountId) {
         knownFriendGids: [...(cfg.knownFriendGids || [])],
         knownFriendGidSyncCooldownSec: cfg.knownFriendGidSyncCooldownSec,
         friendBlacklist: [...(cfg.friendBlacklist || [])],
+        autoRemoveNpcFarmers: !!cfg.autoRemoveNpcFarmers,
+        syncAllOpenIds: [...(cfg.syncAllOpenIds || [])],
+        syncAllImportedAt: cfg.syncAllImportedAt,
+        syncAllLastSyncAt: cfg.syncAllLastSyncAt,
+        syncAllLastSyncFriendCount: cfg.syncAllLastSyncFriendCount,
         ui: { ...globalConfig.ui },
         qrLogin: normalizeQrLoginConfig(globalConfig.qrLogin),
         runtimeClient: getRuntimeClientConfig(),
@@ -769,6 +835,29 @@ function applyConfigSnapshot(snapshot, options = {}) {
 
     if (Array.isArray(cfg.friendBlacklist)) {
         next.friendBlacklist = cfg.friendBlacklist.map(Number).filter(n => Number.isFinite(n) && n > 0);
+    }
+
+    if (cfg.autoRemoveNpcFarmers !== undefined) {
+        next.autoRemoveNpcFarmers = !!cfg.autoRemoveNpcFarmers;
+    }
+
+    if (cfg.syncAllOpenIds !== undefined) {
+        next.syncAllOpenIds = normalizeSyncAllOpenIds(cfg.syncAllOpenIds, next.syncAllOpenIds);
+    }
+
+    if (cfg.syncAllImportedAt !== undefined) {
+        next.syncAllImportedAt = normalizeSnapshotTimestamp(cfg.syncAllImportedAt, next.syncAllImportedAt);
+    }
+
+    if (cfg.syncAllLastSyncAt !== undefined) {
+        next.syncAllLastSyncAt = normalizeSnapshotTimestamp(cfg.syncAllLastSyncAt, next.syncAllLastSyncAt);
+    }
+
+    if (cfg.syncAllLastSyncFriendCount !== undefined) {
+        next.syncAllLastSyncFriendCount = normalizeSnapshotCount(
+            cfg.syncAllLastSyncFriendCount,
+            next.syncAllLastSyncFriendCount,
+        );
     }
 
     if (cfg.ui && typeof cfg.ui === 'object') {
@@ -892,6 +981,57 @@ function setFriendBlacklist(accountId, list) {
     return [...next.friendBlacklist];
 }
 
+function getAutoRemoveNpcFarmers(accountId) {
+    return !!getAccountConfigSnapshot(accountId).autoRemoveNpcFarmers;
+}
+
+function setAutoRemoveNpcFarmers(accountId, value) {
+    const current = getAccountConfigSnapshot(accountId);
+    const next = normalizeAccountConfig(current, accountFallbackConfig);
+    next.autoRemoveNpcFarmers = !!value;
+    setAccountConfigSnapshot(accountId, next);
+    return next.autoRemoveNpcFarmers;
+}
+
+function getSyncAllOpenIds(accountId) {
+    return [...(getAccountConfigSnapshot(accountId).syncAllOpenIds || [])];
+}
+
+function getSyncAllImportState(accountId) {
+    const cfg = getAccountConfigSnapshot(accountId);
+    return {
+        openIdCount: Array.isArray(cfg.syncAllOpenIds) ? cfg.syncAllOpenIds.length : 0,
+        importedAt: normalizeSnapshotTimestamp(cfg.syncAllImportedAt),
+        lastSyncAt: normalizeSnapshotTimestamp(cfg.syncAllLastSyncAt),
+        lastSyncFriendCount: normalizeSnapshotCount(cfg.syncAllLastSyncFriendCount),
+    };
+}
+
+function setSyncAllOpenIds(accountId, list, options = {}) {
+    const current = getAccountConfigSnapshot(accountId);
+    const next = normalizeAccountConfig(current, accountFallbackConfig);
+    next.syncAllOpenIds = normalizeSyncAllOpenIds(list, next.syncAllOpenIds);
+    next.syncAllImportedAt = normalizeSnapshotTimestamp(
+        options.importedAt !== undefined ? options.importedAt : Date.now(),
+        next.syncAllImportedAt,
+    );
+    if (options.resetSyncStatus !== false) {
+        next.syncAllLastSyncAt = 0;
+        next.syncAllLastSyncFriendCount = 0;
+    }
+    setAccountConfigSnapshot(accountId, next);
+    return getSyncAllImportState(accountId);
+}
+
+function setSyncAllLastSyncResult(accountId, friendCount, syncedAt = Date.now()) {
+    const current = getAccountConfigSnapshot(accountId);
+    const next = normalizeAccountConfig(current, accountFallbackConfig);
+    next.syncAllLastSyncAt = normalizeSnapshotTimestamp(syncedAt, next.syncAllLastSyncAt);
+    next.syncAllLastSyncFriendCount = normalizeSnapshotCount(friendCount, next.syncAllLastSyncFriendCount);
+    setAccountConfigSnapshot(accountId, next);
+    return getSyncAllImportState(accountId);
+}
+
 function getUI() {
     return { ...globalConfig.ui };
 }
@@ -1011,6 +1151,12 @@ module.exports = {
     setKnownFriendGidSyncCooldownSec,
     getFriendBlacklist,
     setFriendBlacklist,
+    getAutoRemoveNpcFarmers,
+    setAutoRemoveNpcFarmers,
+    getSyncAllOpenIds,
+    setSyncAllOpenIds,
+    getSyncAllImportState,
+    setSyncAllLastSyncResult,
     getUI,
     setUITheme,
     getOfflineReminder,

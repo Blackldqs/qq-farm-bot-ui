@@ -47,6 +47,8 @@ function createRuntimeState(options) {
             knownFriendGidSyncCooldownSec: store.getKnownFriendGidSyncCooldownSec
                 ? store.getKnownFriendGidSyncCooldownSec(accountId)
                 : 600,
+            autoRemoveNpcFarmers: store.getAutoRemoveNpcFarmers ? store.getAutoRemoveNpcFarmers(accountId) : false,
+            syncAllOpenIds: store.getSyncAllOpenIds ? store.getSyncAllOpenIds(accountId) : [],
             friendBlacklist: store.getFriendBlacklist(accountId),
             runtimeClient: store.getRuntimeClientConfig ? store.getRuntimeClientConfig() : null,
             __revision: configRevision,

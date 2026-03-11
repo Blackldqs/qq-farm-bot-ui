@@ -10,8 +10,10 @@ const {
     getFriendQuietHours,
     getFriendBlacklist,
     getAutomation,
+    getAutoRemoveNpcFarmers,
     getKnownFriendGids,
     getKnownFriendGidSyncCooldownSec,
+    getSyncAllOpenIds,
     applyConfigSnapshot,
 } = require('../models/store');
 const { sendMsgAsync, getUserState, networkEvents } = require('../utils/network');
@@ -43,7 +45,8 @@ const MIN_QQ_VISITOR_GID_SYNC_RETRY_MS = 30 * 1000;
 const MAX_QQ_VISITOR_GID_SYNC_RETRY_MS = 2 * 60 * 1000;
 const INVALID_KNOWN_FRIEND_GID_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const KNOWN_QQ_FRIEND_FETCH_MISS_THRESHOLD = 3;
-const IGNORED_QQ_FRIEND_NAMES = new Set(['小小农夫']);
+const NPC_QQ_FRIEND_NAMES = new Set(['小小农夫']);
+const IMPORTED_SYNCALL_WARN_INTERVAL_MS = 5 * 60 * 1000;
 
 // 操作限制状态 (从服务器响应中更新)
 // 操作类型ID (根据游戏代码):
@@ -66,6 +69,7 @@ const OP_NAMES = {
 let canGetHelpExp = true;
 let helpAutoDisabledByLimit = false;
 let lastVisitorGidSyncAt = 0;
+let lastImportedSyncAllWarnAt = 0;
 const invalidKnownFriendGidCooldownUntil = new Map();
 const knownQqFriendFetchMissCount = new Map();
 
@@ -159,15 +163,46 @@ function normalizeFriendName(name) {
     return String(name || '').trim();
 }
 
-function isIgnoredQqFriendName(name) {
-    return IGNORED_QQ_FRIEND_NAMES.has(normalizeFriendName(name));
+function isNpcQqFriendName(name) {
+    return NPC_QQ_FRIEND_NAMES.has(normalizeFriendName(name));
+}
+
+function shouldAutoRemoveNpcQqFriends() {
+    return !!(getAutoRemoveNpcFarmers && getAutoRemoveNpcFarmers());
+}
+
+function isNpcQqFriend(friend) {
+    if (!friend || typeof friend !== 'object') return false;
+    const level = toNum(friend.level);
+    if (level !== 1) return false;
+    return isNpcQqFriendName(friend.name) || isNpcQqFriendName(friend.remark) || isNpcQqFriendName(friend.nick);
+}
+
+function splitNpcQqFriends(friends) {
+    const source = Array.isArray(friends) ? friends : [];
+    const keptFriends = [];
+    const filteredFriends = [];
+    const npcFriends = [];
+    for (const friend of source) {
+        if (isNpcQqFriend(friend)) npcFriends.push(friend);
+        else filteredFriends.push(friend);
+        keptFriends.push(friend);
+    }
+    return {
+        normalFriends: shouldAutoRemoveNpcQqFriends() ? filteredFriends : keptFriends,
+        npcFriends,
+    };
+}
+
+function shouldIgnoreQqVisitorRecord(record) {
+    return shouldAutoRemoveNpcQqFriends() && isNpcQqFriend(record);
 }
 
 function shouldSyncKnownQqVisitorRecord(record, selfGid = 0) {
     const gid = toNum(record && record.visitorGid);
     if (gid <= 0) return false;
     if (selfGid > 0 && gid === selfGid) return false;
-    if (isIgnoredQqFriendName(record && record.nick)) return false;
+    if (shouldIgnoreQqVisitorRecord(record)) return false;
     return true;
 }
 
@@ -349,6 +384,85 @@ function normalizeFriendGids(values) {
     return normalized;
 }
 
+function getImportedSyncAllOpenIds() {
+    const openIds = typeof getSyncAllOpenIds === 'function' ? getSyncAllOpenIds() : [];
+    return Array.isArray(openIds) ? openIds : [];
+}
+
+function logImportedSyncAllWarn(message, extra = {}) {
+    const now = Date.now();
+    if (now - lastImportedSyncAllWarnAt < IMPORTED_SYNCALL_WARN_INTERVAL_MS) return;
+    lastImportedSyncAllWarnAt = now;
+    logWarn('好友', message, {
+        module: 'friend',
+        event: 'syncall_imported',
+        result: 'error',
+        ...extra,
+    });
+}
+
+function syncAutoPrunedNpcConfig(npcFriends, reason = '') {
+    const list = Array.isArray(npcFriends) ? npcFriends : [];
+    if (!shouldAutoRemoveNpcQqFriends() || list.length === 0) {
+        return {
+            npcCount: 0,
+            removedKnownGidCount: 0,
+            removedOpenIdCount: 0,
+        };
+    }
+
+    const npcGidSet = new Set(normalizeFriendGids(list.map(friend => friend && friend.gid)));
+    const npcOpenIdSet = new Set(
+        list
+            .map(friend => String(friend && friend.open_id || '').trim().toUpperCase())
+            .filter(Boolean),
+    );
+    const currentKnownGids = normalizeFriendGids(getKnownFriendGids());
+    const nextKnownGids = currentKnownGids.filter(gid => !npcGidSet.has(gid));
+    const currentOpenIds = getImportedSyncAllOpenIds();
+    const nextOpenIds = currentOpenIds.filter(openId => !npcOpenIdSet.has(String(openId || '').trim().toUpperCase()));
+
+    let removedKnownGidCount = 0;
+    if (nextKnownGids.length !== currentKnownGids.length) {
+        removedKnownGidCount = currentKnownGids.length - nextKnownGids.length;
+        applyConfigSnapshot({ knownFriendGids: nextKnownGids }, { persist: false });
+        postToMaster({
+            type: 'known_friend_gids_replace',
+            gids: nextKnownGids,
+            reason: String(reason || ''),
+        });
+    }
+
+    let removedOpenIdCount = 0;
+    if (nextOpenIds.length !== currentOpenIds.length) {
+        removedOpenIdCount = currentOpenIds.length - nextOpenIds.length;
+        applyConfigSnapshot({ syncAllOpenIds: nextOpenIds }, { persist: false });
+        postToMaster({
+            type: 'syncall_open_ids_replace',
+            openIds: nextOpenIds,
+            reason: String(reason || ''),
+        });
+    }
+
+    if (removedKnownGidCount > 0 || removedOpenIdCount > 0) {
+        log('好友', `已自动清理 ${list.length} 个 1 级小小农夫`, {
+            module: 'friend',
+            event: 'npc_cleanup',
+            result: 'ok',
+            npcCount: list.length,
+            removedKnownGidCount,
+            removedOpenIdCount,
+            reason: String(reason || ''),
+        });
+    }
+
+    return {
+        npcCount: list.length,
+        removedKnownGidCount,
+        removedOpenIdCount,
+    };
+}
+
 function extractReplyFriends(reply) {
     if (Array.isArray(reply && reply.game_friends)) return reply.game_friends;
     if (Array.isArray(reply && reply.gameFriends)) return reply.gameFriends;
@@ -376,9 +490,11 @@ function buildFriendReply(friends) {
 }
 
 function syncKnownFriendGidsFromFriends(friends) {
+    const sourceFriends = Array.isArray(friends) ? friends : [];
+    const { normalFriends, npcFriends } = splitNpcQqFriends(sourceFriends);
+    syncAutoPrunedNpcConfig(npcFriends, 'sync_known_from_friends');
     const fetchedGids = normalizeFriendGids(
-        (Array.isArray(friends) ? friends : [])
-            .filter(friend => !isIgnoredQqFriendName(friend && friend.name) && !isIgnoredQqFriendName(friend && friend.remark))
+        normalFriends
             .map(friend => friend && friend.gid),
     );
     if (fetchedGids.length === 0) return [];
@@ -435,6 +551,7 @@ async function syncKnownFriendGidsFromRecentVisitors(force = false) {
         lastVisitorGidSyncAt = now;
 
         if (visitorGids.length === 0) {
+            await pruneNpcQqFriendsDuringMaintenance('visitor_gid_sync_empty');
             return getEffectiveKnownQqFriendGids();
         }
 
@@ -461,10 +578,8 @@ async function syncKnownFriendGidsFromRecentVisitors(force = false) {
                 totalKnownGids: merged.length,
             });
         }
-        return normalizeFriendGids([
-            ...merged,
-            ...getFriendBlacklist(),
-        ]);
+        await pruneNpcQqFriendsDuringMaintenance('visitor_gid_sync');
+        return getEffectiveKnownQqFriendGids();
     } catch (e) {
         const retryMs = getKnownFriendGidSyncRetryMs();
         const intervalMs = getKnownFriendGidSyncIntervalMs();
@@ -528,6 +643,109 @@ function handleFriendEnterError(friendGid, friendName, error) {
     return { handled: false, kind: 'error' };
 }
 
+async function fetchQqFriendsByImportedSyncAll() {
+    const syncReq = types.SyncAllRequest || types.SyncAllFriendsRequest;
+    const syncRep = types.SyncAllReply || types.SyncAllFriendsReply;
+    if (!syncReq || !syncRep) throw new Error('SyncAll 接口类型未加载');
+
+    const openIds = getImportedSyncAllOpenIds();
+    if (openIds.length === 0) {
+        return { openIds: [], friends: [] };
+    }
+
+    const body = syncReq.encode(syncReq.create({ open_ids: openIds })).finish();
+    const { body: replyBody } = await sendMsgAsync('gamepb.friendpb.FriendService', 'SyncAll', body);
+    const reply = syncRep.decode(replyBody);
+    const rawFriends = dedupeFriendsByGid(extractReplyFriends(reply));
+    const { normalFriends, npcFriends } = splitNpcQqFriends(rawFriends);
+    syncAutoPrunedNpcConfig(npcFriends, 'syncall_imported');
+    return {
+        openIds,
+        friends: normalFriends,
+        rawFriendCount: rawFriends.length,
+        npcFriendCount: npcFriends.length,
+    };
+}
+
+async function syncImportedQqFriends(options = {}) {
+    const openIds = getImportedSyncAllOpenIds();
+    if (String(CONFIG.platform || '').trim().toLowerCase() !== 'qq' || openIds.length === 0) {
+        return {
+            used: false,
+            openIdCount: openIds.length,
+            friendCount: 0,
+            rawFriendCount: 0,
+            npcFriendCount: 0,
+        };
+    }
+
+    const result = await fetchQqFriendsByImportedSyncAll();
+    if (result.friends.length > 0) {
+        syncKnownFriendGidsFromFriends(result.friends);
+    }
+    postToMaster({
+        type: 'syncall_last_sync_result',
+        friendCount: result.friends.length,
+        syncedAt: Date.now(),
+    });
+
+    if (options.logSummary) {
+        log('好友', `已通过导入的 SyncAll 请求同步 ${result.friends.length} 名好友 (OpenID ${result.openIds.length})`, {
+            module: 'friend',
+            event: 'syncall_imported',
+            result: 'ok',
+            friendCount: result.friends.length,
+            openIdCount: result.openIds.length,
+            npcFriendCount: result.npcFriendCount,
+        });
+    }
+
+    return {
+        used: true,
+        openIdCount: result.openIds.length,
+        friendCount: result.friends.length,
+        rawFriendCount: result.rawFriendCount,
+        npcFriendCount: result.npcFriendCount,
+    };
+}
+
+async function pruneNpcQqFriendsDuringMaintenance(reason = 'maintenance') {
+    if (!shouldAutoRemoveNpcQqFriends() || String(CONFIG.platform || '').trim().toLowerCase() !== 'qq') {
+        return {
+            npcCount: 0,
+            removedKnownGidCount: 0,
+            removedOpenIdCount: 0,
+        };
+    }
+
+    try {
+        const importedOpenIds = getImportedSyncAllOpenIds();
+        if (importedOpenIds.length > 0) {
+            const imported = await fetchQqFriendsByImportedSyncAll();
+            return {
+                npcCount: imported.npcFriendCount || 0,
+                removedKnownGidCount: 0,
+                removedOpenIdCount: 0,
+            };
+        }
+
+        const knownGids = getEffectiveKnownQqFriendGids();
+        if (knownGids.length > 0) {
+            await fetchQqFriendsByKnownGids();
+        }
+    } catch (e) {
+        logImportedSyncAllWarn(`自动清理 1 级小小农夫失败: ${e.message}`, {
+            reason: String(reason || ''),
+        });
+    }
+
+    return {
+        npcCount: 0,
+        removedKnownGidCount: 0,
+        removedOpenIdCount: 0,
+    };
+}
+
 async function fetchQqFriendsByKnownGids() {
     if (!types.GetGameFriendsRequest || !types.GetAllFriendsReply) {
         throw new Error('GetGameFriends 接口类型未加载');
@@ -547,8 +765,9 @@ async function fetchQqFriendsByKnownGids() {
         try {
             const { body: replyBody } = await sendMsgAsync('gamepb.friendpb.FriendService', 'GetGameFriends', body);
             const reply = types.GetAllFriendsReply.decode(replyBody);
-            const batchFriends = extractReplyFriends(reply)
-                .filter(friend => !isIgnoredQqFriendName(friend && friend.name) && !isIgnoredQqFriendName(friend && friend.remark));
+            const rawBatchFriends = extractReplyFriends(reply);
+            const { normalFriends: batchFriends, npcFriends } = splitNpcQqFriends(rawBatchFriends);
+            syncAutoPrunedNpcConfig(npcFriends, 'get_game_friends');
             handleKnownQqFriendFetchMisses(batch, batchFriends);
             allFriends.push(...batchFriends);
         } catch (e) {
@@ -577,7 +796,10 @@ async function fetchQqFriendsByLegacyMethod() {
         if (!syncReq || !syncRep) throw new Error('SyncAll 接口类型未加载');
         const body = syncReq.encode(syncReq.create({ open_ids: [] })).finish();
         const { body: replyBody } = await sendMsgAsync('gamepb.friendpb.FriendService', 'SyncAll', body);
-        return extractReplyFriends(syncRep.decode(replyBody));
+        const rawFriends = extractReplyFriends(syncRep.decode(replyBody));
+        const { normalFriends, npcFriends } = splitNpcQqFriends(rawFriends);
+        syncAutoPrunedNpcConfig(npcFriends, 'legacy_syncall');
+        return normalFriends;
     } catch (e) {
         errors.push(`SyncAll: ${e.message}`);
     }
@@ -586,7 +808,10 @@ async function fetchQqFriendsByLegacyMethod() {
         if (!types.GetAllFriendsRequest || !types.GetAllFriendsReply) throw new Error('GetAll 接口类型未加载');
         const body = types.GetAllFriendsRequest.encode(types.GetAllFriendsRequest.create({})).finish();
         const { body: replyBody } = await sendMsgAsync('gamepb.friendpb.FriendService', 'GetAll', body);
-        return extractReplyFriends(types.GetAllFriendsReply.decode(replyBody));
+        const rawFriends = extractReplyFriends(types.GetAllFriendsReply.decode(replyBody));
+        const { normalFriends, npcFriends } = splitNpcQqFriends(rawFriends);
+        syncAutoPrunedNpcConfig(npcFriends, 'legacy_getall');
+        return normalFriends;
     } catch (e) {
         errors.push(`GetAll: ${e.message}`);
     }
@@ -597,6 +822,21 @@ async function fetchQqFriendsByLegacyMethod() {
 async function getAllFriends() {
     const isQQ = CONFIG.platform === 'qq';
     if (isQQ) {
+        const importedOpenIds = getImportedSyncAllOpenIds();
+        if (importedOpenIds.length > 0) {
+            try {
+                const imported = await fetchQqFriendsByImportedSyncAll();
+                if (imported.friends.length > 0) {
+                    syncKnownFriendGidsFromFriends(imported.friends);
+                    return buildFriendReply(imported.friends);
+                }
+            } catch (e) {
+                logImportedSyncAllWarn(`导入的 SyncAll 请求同步失败: ${e.message}`, {
+                    openIdCount: importedOpenIds.length,
+                });
+            }
+        }
+
         await syncKnownFriendGidsFromRecentVisitors();
         const friendsFromKnownGids = await fetchQqFriendsByKnownGids();
         if (friendsFromKnownGids.length > 0) {
@@ -1005,7 +1245,7 @@ async function getFriendsList() {
         const friends = extractReplyFriends(reply);
         const state = getUserState();
         return friends
-            .filter(f => toNum(f.gid) !== state.gid && !isIgnoredQqFriendName(f.name) && !isIgnoredQqFriendName(f.remark))
+            .filter(f => toNum(f.gid) !== state.gid && (!shouldAutoRemoveNpcQqFriends() || !isNpcQqFriend(f)))
             .map(f => ({
                 gid: toNum(f.gid),
                 name: f.remark || f.name || `GID:${toNum(f.gid)}`,
@@ -1471,7 +1711,7 @@ async function checkFriends() {
             if (gid === state.gid) continue;
             if (visitedGids.has(gid)) continue;
             if (blacklist.has(gid)) continue;
-            if (isIgnoredQqFriendName(f.name) || isIgnoredQqFriendName(f.remark)) continue;
+            if (shouldAutoRemoveNpcQqFriends() && isNpcQqFriend(f)) continue;
             
             const name = f.remark || f.name || `GID:${gid}`;
             const p = f.plant;
@@ -1673,6 +1913,7 @@ module.exports = {
     refreshFriendCheckLoop,
     checkAndAcceptApplications,
     getOperationLimits,
+    syncImportedQqFriends,
     getFriendsList,
     getFriendLandsDetail,
     doFriendOperation,

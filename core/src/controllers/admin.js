@@ -20,6 +20,8 @@ const { createModuleLogger } = require('../services/logger');
 const { MiniProgramLoginSession } = require('../services/qrlogin');
 const { sendPushooMessage } = require('../services/push');
 const { getSchedulerRegistrySnapshot } = require('../services/scheduler');
+const { loadProto, types } = require('../utils/proto');
+const cryptoWasm = require('../utils/crypto-wasm');
 const { 
     hashPassword: secureHash, 
     verifyPassword,
@@ -254,6 +256,86 @@ function startAdminServer(dataProvider) {
             knownFriendGidSyncCooldownSec: store.getKnownFriendGidSyncCooldownSec
                 ? store.getKnownFriendGidSyncCooldownSec(accountId)
                 : 600,
+            autoRemoveNpcFarmers: store.getAutoRemoveNpcFarmers
+                ? !!store.getAutoRemoveNpcFarmers(accountId)
+                : false,
+        };
+    }
+
+    function normalizeSyncAllOpenIds(values) {
+        const source = Array.isArray(values) ? values : [];
+        const normalized = [];
+        const seen = new Set();
+        for (const item of source) {
+            const value = String(item || '').trim().toUpperCase();
+            if (!value || value.length > 128) continue;
+            if (!/^[0-9A-Z_-]+$/.test(value)) continue;
+            if (seen.has(value)) continue;
+            seen.add(value);
+            normalized.push(value);
+        }
+        return normalized;
+    }
+
+    function buildSyncAllImportSettings(accountId) {
+        const state = store.getSyncAllImportState ? store.getSyncAllImportState(accountId) : {};
+        return {
+            importedAt: Number(state.importedAt || 0),
+            openIdCount: Number(state.openIdCount || 0),
+            lastSyncAt: Number(state.lastSyncAt || 0),
+            lastSyncFriendCount: Number(state.lastSyncFriendCount || 0),
+        };
+    }
+
+    async function parseSyncAllRequestHex(hexText) {
+        await loadProto();
+        const sanitized = String(hexText || '').replace(/[^0-9a-f]/gi, '');
+        if (!sanitized) {
+            throw new Error('请求包为空');
+        }
+        if (sanitized.length % 2 !== 0) {
+            throw new Error('十六进制长度无效');
+        }
+
+        const wire = Buffer.from(sanitized, 'hex');
+        const gate = types.GateMessage.decode(wire);
+        const meta = gate && gate.meta ? gate.meta : null;
+        const serviceName = String(meta && meta.service_name || '');
+        const methodName = String(meta && meta.method_name || '');
+        const messageType = Number(meta && meta.message_type || 0);
+        if (serviceName !== 'gamepb.friendpb.FriendService' || methodName !== 'SyncAll' || messageType !== 1) {
+            throw new Error('只支持导入 FriendService.SyncAll 请求包');
+        }
+
+        const decrypted = await cryptoWasm.decryptBuffer(gate.body);
+        const requestType = types.SyncAllRequest || types.SyncAllFriendsRequest;
+        if (!requestType) {
+            throw new Error('SyncAllRequest 类型未加载');
+        }
+
+        const request = requestType.decode(decrypted);
+        const requestObject = requestType.toObject(request, {
+            longs: String,
+            bytes: String,
+            arrays: true,
+            objects: true,
+        });
+        const openIds = normalizeSyncAllOpenIds(requestObject.open_ids);
+        if (openIds.length === 0) {
+            throw new Error('请求包中没有可用的 OpenID');
+        }
+
+        return {
+            openIds,
+            meta: {
+                serviceName,
+                methodName,
+                messageType,
+                clientSeq: Number(meta && meta.client_seq || 0),
+                serverSeq: Number(meta && meta.server_seq || 0),
+            },
+            wireBytes: wire.length,
+            bodyBytes: decrypted.length,
         };
     }
 
@@ -411,6 +493,9 @@ function startAdminServer(dataProvider) {
             if (body.knownFriendGidSyncCooldownSec !== undefined && store.setKnownFriendGidSyncCooldownSec) {
                 store.setKnownFriendGidSyncCooldownSec(id, body.knownFriendGidSyncCooldownSec);
             }
+            if (body.autoRemoveNpcFarmers !== undefined && store.setAutoRemoveNpcFarmers) {
+                store.setAutoRemoveNpcFarmers(id, body.autoRemoveNpcFarmers);
+            }
             broadcastAccountConfig(id);
             return res.json({ ok: true, data: buildKnownFriendGidSettings(id) });
         } catch (e) {
@@ -456,6 +541,95 @@ function startAdminServer(dataProvider) {
             }
             broadcastAccountConfig(id);
             return res.json({ ok: true, data: buildKnownFriendGidSettings(id) });
+        } catch (e) {
+            return handleApiError(res, e);
+        }
+    });
+
+    app.get('/api/friend-syncall-import', (req, res) => {
+        const id = getAccId(req);
+        if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
+        try {
+            return res.json({ ok: true, data: buildSyncAllImportSettings(id) });
+        } catch (e) {
+            return handleApiError(res, e);
+        }
+    });
+
+    app.post('/api/friend-syncall-import', async (req, res) => {
+        const id = getAccId(req);
+        if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
+
+        try {
+            const body = (req.body && typeof req.body === 'object') ? req.body : {};
+            let previousFriendGidSet = new Set();
+            if (provider && typeof provider.getFriends === 'function') {
+                try {
+                    const previousFriends = await provider.getFriends(id);
+                    previousFriendGidSet = new Set(
+                        (Array.isArray(previousFriends) ? previousFriends : [])
+                            .map(item => Number(item && item.gid))
+                            .filter(gid => Number.isFinite(gid) && gid > 0),
+                    );
+                } catch {}
+            }
+            const parsed = await parseSyncAllRequestHex(body.hex || '');
+            if (!store.setSyncAllOpenIds) {
+                throw new Error('当前版本不支持保存 SyncAll 导入数据');
+            }
+
+            store.setSyncAllOpenIds(id, parsed.openIds, {
+                importedAt: Date.now(),
+                resetSyncStatus: true,
+            });
+            broadcastAccountConfig(id);
+
+            let syncResult = null;
+            let resultSummary = null;
+            if (provider && typeof provider.syncImportedQqFriends === 'function') {
+                try {
+                    syncResult = await provider.syncImportedQqFriends(id);
+                    if (syncResult && syncResult.used && store.setSyncAllLastSyncResult) {
+                        store.setSyncAllLastSyncResult(id, syncResult.friendCount, Date.now());
+                    }
+                    if (provider && typeof provider.getFriends === 'function') {
+                        try {
+                            const currentFriends = await provider.getFriends(id);
+                            const currentList = Array.isArray(currentFriends) ? currentFriends : [];
+                            const currentFriendGids = currentList
+                                .map(item => Number(item && item.gid))
+                                .filter(gid => Number.isFinite(gid) && gid > 0);
+                            let existingFriendCount = 0;
+                            for (const gid of currentFriendGids) {
+                                if (previousFriendGidSet.has(gid)) existingFriendCount += 1;
+                            }
+                            resultSummary = {
+                                fetchedFriendCount: Number(syncResult && syncResult.rawFriendCount) || 0,
+                                npcFriendCount: Number(syncResult && syncResult.npcFriendCount) || 0,
+                                existingFriendCount,
+                                currentFriendCount: currentList.length,
+                            };
+                        } catch {}
+                    }
+                } catch (e) {
+                    syncResult = {
+                        used: false,
+                        error: e && e.message ? e.message : String(e || '同步失败'),
+                    };
+                }
+            }
+
+            return res.json({
+                ok: true,
+                data: buildSyncAllImportSettings(id),
+                parsed: {
+                    openIdCount: parsed.openIds.length,
+                    wireBytes: parsed.wireBytes,
+                    bodyBytes: parsed.bodyBytes,
+                },
+                syncResult,
+                resultSummary,
+            });
         } catch (e) {
             return handleApiError(res, e);
         }

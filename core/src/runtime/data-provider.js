@@ -92,6 +92,7 @@ function createDataProvider(options) {
         getLands: (accountRef) => callWorkerApi(resolveAccountRefId(accountRef), 'getLands'),
         getFriends: (accountRef) => callWorkerApi(resolveAccountRefId(accountRef), 'getFriends'),
         getInteractRecords: (accountRef) => callWorkerApi(resolveAccountRefId(accountRef), 'getInteractRecords'),
+        syncImportedQqFriends: (accountRef) => callWorkerApi(resolveAccountRefId(accountRef), 'syncImportedQqFriends'),
         getFriendBlacklist: async (accountRef) => {
             const accountId = resolveAccountRefId(accountRef);
             if (!accountId) return [];

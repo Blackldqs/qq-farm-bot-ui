@@ -20,7 +20,10 @@ function createWorkerManager(options) {
         deleteAccount,
         upsertFriendBlacklist,
         upsertKnownFriendGids,
+        replaceKnownFriendGids,
         removeKnownFriendGid,
+        replaceSyncAllOpenIds,
+        updateSyncAllLastSyncResult,
         broadcastConfigToWorkers,
         onStatusSync,
         onWorkerLog,
@@ -321,6 +324,15 @@ function createWorkerManager(options) {
                     broadcastConfigToWorkers(accountId);
                 }
             } catch {}
+        } else if (msg.type === 'known_friend_gids_replace') {
+            const gids = Array.isArray(msg.gids) ? msg.gids : [];
+            if (typeof replaceKnownFriendGids !== 'function') return;
+            try {
+                const changed = !!replaceKnownFriendGids(accountId, gids);
+                if (changed && typeof broadcastConfigToWorkers === 'function') {
+                    broadcastConfigToWorkers(accountId);
+                }
+            } catch {}
         } else if (msg.type === 'known_friend_gid_remove') {
             const gid = Number(msg.gid);
             if (!Number.isFinite(gid) || gid <= 0 || typeof removeKnownFriendGid !== 'function') return;
@@ -329,6 +341,21 @@ function createWorkerManager(options) {
                 if (changed && typeof broadcastConfigToWorkers === 'function') {
                     broadcastConfigToWorkers(accountId);
                 }
+            } catch {}
+        } else if (msg.type === 'syncall_open_ids_replace') {
+            const openIds = Array.isArray(msg.openIds) ? msg.openIds : [];
+            if (typeof replaceSyncAllOpenIds !== 'function') return;
+            try {
+                const changed = !!replaceSyncAllOpenIds(accountId, openIds);
+                if (changed && typeof broadcastConfigToWorkers === 'function') {
+                    broadcastConfigToWorkers(accountId);
+                }
+            } catch {}
+        } else if (msg.type === 'syncall_last_sync_result') {
+            const friendCount = Number(msg.friendCount);
+            if (!Number.isFinite(friendCount) || friendCount < 0 || typeof updateSyncAllLastSyncResult !== 'function') return;
+            try {
+                updateSyncAllLastSyncResult(accountId, friendCount, Number(msg.syncedAt) || Date.now());
             } catch {}
         } else if (msg.type === 'api_response') {
             const { id, result, error } = msg;

@@ -409,7 +409,7 @@ async function executeClearLogs() {
 }
 
 watch(currentAccountId, () => {
-  refresh()
+  refresh(true)
 })
 
 watch(() => status.value?.connection?.connected, (connected) => {

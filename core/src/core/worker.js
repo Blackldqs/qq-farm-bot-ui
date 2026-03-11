@@ -9,7 +9,7 @@ const { getAutomation, getPreferredSeed, getConfigSnapshot, applyConfigSnapshot 
 const { checkAndClaimEmails } = require('../services/email');
 const { getEmailDailyState } = require('../services/email');
 const { checkFarm, startFarmCheckLoop, stopFarmCheckLoop, refreshFarmCheckLoop, getLandsDetail, getAvailableSeeds, runFarmOperation, runFertilizerByConfig } = require('../services/farm');
-const { checkFriends, startFriendCheckLoop, stopFriendCheckLoop, refreshFriendCheckLoop, getFriendsList, getFriendLandsDetail, doFriendOperation } = require('../services/friend');
+const { checkFriends, startFriendCheckLoop, stopFriendCheckLoop, refreshFriendCheckLoop, getFriendsList, getFriendLandsDetail, doFriendOperation, syncImportedQqFriends } = require('../services/friend');
 const { getInteractRecords } = require('../services/interact');
 const { processInviteCodes } = require('../services/invite');
 const { autoBuyOrganicFertilizer, buyFreeGifts, getFreeGiftDailyState } = require('../services/mall');
@@ -573,6 +573,18 @@ async function startBot(config) {
         setInitialValues(Number(latest.gold || 0), Number(latest.exp || 0), Number(latest.coupon || 0));
         resetSessionGains();
 
+        if (String(CONFIG.platform || '').trim().toLowerCase() === 'qq') {
+            try {
+                await syncImportedQqFriends({ logSummary: true });
+            } catch (e) {
+                log('好友', `登录后尝试 SyncAll 失败: ${e.message}`, {
+                    module: 'friend',
+                    event: 'syncall_warmup',
+                    result: 'error',
+                });
+            }
+        }
+
         // 登录成功后启动各模块
         await processInviteCodes();
         if (getAutomation().fertilizer_gift) {
@@ -645,6 +657,9 @@ async function handleApiCall(msg) {
                 break;
             case 'getFriends':
                 result = await getFriendsList();
+                break;
+            case 'syncImportedQqFriends':
+                result = await syncImportedQqFriends({ logSummary: true });
                 break;
             case 'getInteractRecords':
                 result = await getInteractRecords();

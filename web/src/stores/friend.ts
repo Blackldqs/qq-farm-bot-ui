@@ -5,6 +5,14 @@ import api from '@/api'
 export interface KnownFriendSettings {
   knownFriendGids: number[]
   knownFriendGidSyncCooldownSec: number
+  autoRemoveNpcFarmers: boolean
+}
+
+export interface SyncAllImportStatus {
+  importedAt: number
+  openIdCount: number
+  lastSyncAt: number
+  lastSyncFriendCount: number
 }
 
 function normalizeKnownFriendGids(input: unknown): number[] {
@@ -27,6 +35,34 @@ function normalizeKnownFriendGidSyncCooldownSec(input: unknown, fallback = 600) 
   return Math.max(30, Math.min(86400, base))
 }
 
+function normalizeTimestampMs(input: unknown) {
+  const value = Number(input ?? 0)
+  if (!Number.isFinite(value) || value <= 0)
+    return 0
+  return Math.floor(value)
+}
+
+function normalizeSyncAllImportStatus(input: unknown): SyncAllImportStatus {
+  const source = (input && typeof input === 'object') ? input as Partial<SyncAllImportStatus> : {}
+  return {
+    importedAt: normalizeTimestampMs(source.importedAt),
+    openIdCount: Math.max(0, Number.parseInt(String(source.openIdCount ?? 0), 10) || 0),
+    lastSyncAt: normalizeTimestampMs(source.lastSyncAt),
+    lastSyncFriendCount: Math.max(0, Number.parseInt(String(source.lastSyncFriendCount ?? 0), 10) || 0),
+  }
+}
+
+function normalizeSyncAllImportResult(input: unknown) {
+  const source = (input && typeof input === 'object') ? input as Record<string, unknown> : {}
+  const toNum = (value: unknown) => Math.max(0, Number.parseInt(String(value ?? 0), 10) || 0)
+  return {
+    fetchedFriendCount: toNum(source.fetchedFriendCount),
+    npcFriendCount: toNum(source.npcFriendCount),
+    existingFriendCount: toNum(source.existingFriendCount),
+    currentFriendCount: toNum(source.currentFriendCount),
+  }
+}
+
 export const useFriendStore = defineStore('friend', () => {
   const friends = ref<any[]>([])
   const loading = ref(false)
@@ -38,8 +74,18 @@ export const useFriendStore = defineStore('friend', () => {
   const interactError = ref('')
   const knownFriendGids = ref<number[]>([])
   const knownFriendGidSyncCooldownSec = ref(600)
+  const autoRemoveNpcFarmers = ref(false)
   const knownFriendSettingsLoading = ref(false)
   const knownFriendSettingsSaving = ref(false)
+  const syncAllImportStatus = ref<SyncAllImportStatus>(normalizeSyncAllImportStatus(null))
+  const syncAllImportLoading = ref(false)
+  const syncAllImportSaving = ref(false)
+  const syncAllImportResult = ref<{
+    fetchedFriendCount: number
+    npcFriendCount: number
+    existingFriendCount: number
+    currentFriendCount: number
+  } | null>(null)
 
   function applyKnownFriendSettings(data: Partial<KnownFriendSettings> | null | undefined) {
     const source = data || {}
@@ -48,11 +94,22 @@ export const useFriendStore = defineStore('friend', () => {
       source.knownFriendGidSyncCooldownSec,
       knownFriendGidSyncCooldownSec.value,
     )
+    autoRemoveNpcFarmers.value = !!source.autoRemoveNpcFarmers
   }
 
   function clearKnownFriendSettings() {
     knownFriendGids.value = []
     knownFriendGidSyncCooldownSec.value = 600
+    autoRemoveNpcFarmers.value = false
+  }
+
+  function applySyncAllImportStatus(data: unknown) {
+    syncAllImportStatus.value = normalizeSyncAllImportStatus(data)
+  }
+
+  function clearSyncAllImportStatus() {
+    syncAllImportStatus.value = normalizeSyncAllImportStatus(null)
+    syncAllImportResult.value = null
   }
 
   function buildPlantSummaryFromDetail(lands: any[], summary: any) {
@@ -189,6 +246,44 @@ export const useFriendStore = defineStore('friend', () => {
     }
   }
 
+  async function fetchSyncAllImportStatus(accountId: string) {
+    if (!accountId)
+      return
+    syncAllImportLoading.value = true
+    try {
+      const res = await api.get('/api/friend-syncall-import', {
+        headers: { 'x-account-id': accountId },
+      })
+      if (res.data.ok) {
+        applySyncAllImportStatus(res.data.data)
+      }
+    }
+    finally {
+      syncAllImportLoading.value = false
+    }
+  }
+
+  async function importSyncAllHex(accountId: string, hex: string) {
+    if (!accountId)
+      return
+    syncAllImportSaving.value = true
+    try {
+      const res = await api.post('/api/friend-syncall-import', { hex }, {
+        headers: { 'x-account-id': accountId },
+      })
+      if (res.data.ok) {
+        applySyncAllImportStatus(res.data.data)
+        syncAllImportResult.value = res.data.resultSummary
+          ? normalizeSyncAllImportResult(res.data.resultSummary)
+          : null
+      }
+      return res.data || null
+    }
+    finally {
+      syncAllImportSaving.value = false
+    }
+  }
+
   async function saveKnownFriendSettings(accountId: string, payload: Partial<KnownFriendSettings>) {
     if (!accountId)
       return
@@ -288,17 +383,26 @@ export const useFriendStore = defineStore('friend', () => {
     interactError,
     knownFriendGids,
     knownFriendGidSyncCooldownSec,
+    autoRemoveNpcFarmers,
     knownFriendSettingsLoading,
     knownFriendSettingsSaving,
+    syncAllImportStatus,
+    syncAllImportLoading,
+    syncAllImportSaving,
+    syncAllImportResult,
     fetchFriends,
     fetchBlacklist,
     toggleBlacklist,
     fetchInteractRecords,
     fetchKnownFriendSettings,
+    fetchSyncAllImportStatus,
     saveKnownFriendSettings,
     addKnownFriendGid,
     removeKnownFriendGid,
     clearKnownFriendSettings,
+    applySyncAllImportStatus,
+    clearSyncAllImportStatus,
+    importSyncAllHex,
     fetchFriendLands,
     operate,
   }
