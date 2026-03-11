@@ -6,6 +6,7 @@ import ConfirmModal from '@/components/ConfirmModal.vue'
 import LandCard from '@/components/LandCard.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
+import BaseSelect from '@/components/ui/BaseSelect.vue'
 import BaseSwitch from '@/components/ui/BaseSwitch.vue'
 import BaseTextarea from '@/components/ui/BaseTextarea.vue'
 import { useAccountStore } from '@/stores/account'
@@ -52,11 +53,17 @@ const interactCollapsed = ref(true)
 const qqSyncCollapsed = ref(true)
 const showSyncAllHelpModal = ref(false)
 const interactFilter = ref('all')
+const friendSortMode = ref('interactive')
 const interactFilters = [
   { key: 'all', label: '全部' },
   { key: 'steal', label: '偷菜' },
   { key: 'help', label: '帮忙' },
   { key: 'bad', label: '捣乱' },
+]
+const friendSortOptions = [
+  { value: 'interactive', label: '可互动排序' },
+  { value: 'level', label: '等级排序' },
+  { value: 'gold', label: '金币排序' },
 ]
 const newKnownFriendGid = ref<number | string>('')
 const localKnownFriendGidSyncCooldownSec = ref(600)
@@ -114,15 +121,16 @@ async function onConfirm() {
 const expandedFriends = ref<Set<string>>(new Set())
 const filteredFriends = computed(() => {
   const keyword = searchKeyword.value.trim().toLowerCase()
-  if (!keyword)
-    return friends.value
+  const filtered = !keyword
+    ? [...friends.value]
+    : friends.value.filter((friend: any) => {
+        const name = String(friend?.name || '').toLowerCase()
+        const gid = String(friend?.gid || '')
+        const uin = String(friend?.uin || '')
+        return name.includes(keyword) || gid.includes(keyword) || uin.includes(keyword)
+      })
 
-  return friends.value.filter((friend: any) => {
-    const name = String(friend?.name || '').toLowerCase()
-    const gid = String(friend?.gid || '')
-    const uin = String(friend?.uin || '')
-    return name.includes(keyword) || gid.includes(keyword) || uin.includes(keyword)
-  })
+  return filtered.sort((a: any, b: any) => compareFriends(a, b, friendSortMode.value))
 })
 
 // 按黑名单分类好友
@@ -260,6 +268,23 @@ function getFriendStatusText(friend: any) {
   return info.length ? info.join(' ') : '无操作'
 }
 
+function getFriendStealCount(friend: any) {
+  const count = Number.parseInt(String(friend?.plant?.stealNum ?? ''), 10)
+  if (!Number.isFinite(count) || count <= 0)
+    return 0
+  return count
+}
+
+function getFriendHelpCount(friend: any) {
+  const dryNum = Number.parseInt(String(friend?.plant?.dryNum ?? ''), 10)
+  const weedNum = Number.parseInt(String(friend?.plant?.weedNum ?? ''), 10)
+  const insectNum = Number.parseInt(String(friend?.plant?.insectNum ?? ''), 10)
+  const total = (Number.isFinite(dryNum) ? Math.max(0, dryNum) : 0)
+    + (Number.isFinite(weedNum) ? Math.max(0, weedNum) : 0)
+    + (Number.isFinite(insectNum) ? Math.max(0, insectNum) : 0)
+  return total
+}
+
 function getFriendLevel(friend: any) {
   const level = Number.parseInt(String(friend?.level ?? ''), 10)
   if (!Number.isFinite(level) || level <= 0)
@@ -279,6 +304,40 @@ function formatFriendGold(value: unknown) {
   if (!Number.isFinite(gold) || gold < 0)
     return '0'
   return gold.toLocaleString('zh-CN')
+}
+
+function compareFriendBase(a: any, b: any) {
+  const levelDiff = getFriendLevel(b) - getFriendLevel(a)
+  if (levelDiff !== 0)
+    return levelDiff
+
+  const nameDiff = String(a?.name || '').localeCompare(String(b?.name || ''), 'zh-CN')
+  if (nameDiff !== 0)
+    return nameDiff
+
+  return Number(a?.gid || 0) - Number(b?.gid || 0)
+}
+
+function compareFriends(a: any, b: any, mode: string) {
+  if (mode === 'level')
+    return compareFriendBase(a, b)
+
+  if (mode === 'gold') {
+    const goldDiff = getFriendGold(a) - getFriendGold(b)
+    if (goldDiff !== 0)
+      return goldDiff
+    return compareFriendBase(a, b)
+  }
+
+  const stealDiff = getFriendStealCount(b) - getFriendStealCount(a)
+  if (stealDiff !== 0)
+    return stealDiff
+
+  const helpDiff = getFriendHelpCount(b) - getFriendHelpCount(a)
+  if (helpDiff !== 0)
+    return helpDiff
+
+  return compareFriendBase(a, b)
 }
 
 function getFriendAvatar(friend: any) {
@@ -542,16 +601,23 @@ function formatSyncAllImportTime(timestamp: number) {
     </div>
 
     <div v-if="status?.connection?.connected && friends.length" class="mb-4">
-      <div class="relative">
-        <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-gray-400">
-          <div class="i-carbon-search" />
+      <div class="flex flex-col gap-3 lg:grid lg:grid-cols-[minmax(0,1fr)_220px]">
+        <div class="relative">
+          <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-gray-400">
+            <div class="i-carbon-search" />
+          </div>
+          <input
+            v-model="searchKeyword"
+            type="text"
+            class="w-full border border-gray-200 rounded-lg bg-white py-2 pl-10 pr-3 text-sm outline-none transition dark:border-gray-700 focus:border-blue-400 dark:bg-gray-800"
+            placeholder="搜索好友昵称 / GID / UIN"
+          >
         </div>
-        <input
-          v-model="searchKeyword"
-          type="text"
-          class="w-full border border-gray-200 rounded-lg bg-white py-2 pl-10 pr-3 text-sm outline-none transition dark:border-gray-700 focus:border-blue-400 dark:bg-gray-800"
-          placeholder="搜索好友昵称 / GID / UIN"
-        >
+        <BaseSelect
+          v-model="friendSortMode"
+          label="排序方式"
+          :options="friendSortOptions"
+        />
       </div>
     </div>
 
