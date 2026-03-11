@@ -50,6 +50,7 @@ const searchKeyword = ref('')
 const blacklistCollapsed = ref(true)
 const interactCollapsed = ref(true)
 const qqSyncCollapsed = ref(true)
+const showSyncAllHelpModal = ref(false)
 const interactFilter = ref('all')
 const interactFilters = [
   { key: 'all', label: '全部' },
@@ -66,6 +67,19 @@ const isQqAccount = computed(() => currentAccountPlatform.value === 'qq')
 const knownFriendGidCount = computed(() => knownFriendGids.value.length)
 const knownFriendGidSet = computed(() => new Set(knownFriendGids.value.map(gid => Number(gid)).filter(gid => gid > 0)))
 const hasImportedSyncAllOpenIds = computed(() => Number(syncAllImportStatus.value.openIdCount || 0) > 0)
+const syncAllHelpRecognizeList = [
+  '请在抓包工具中查看 QQ 农场小程序的 WSS 通信，并找到好友同步请求的 16 进制 Hex 数据。',
+  '只支持导入发包，不支持回包。',
+  '目标请求通常可识别为：gamepb.friendpb.FriendService / SyncAll。',
+  '如果抓包工具能看到协议字段，请优先确认 message_type = 1。',
+  '导入内容必须是原始 16 进制 Hex 数据，可以包含空格和换行。',
+]
+const syncAllHelpWrongList = [
+  '如果内容里有大量好友昵称、头像链接、thirdqq.qlogo.cn，通常那是回包，不要导入。',
+  '其他接口的数据不能用。',
+  '普通文本日志、JSON、截图文字都不能用。',
+  '只复制了一半的数据，也会导致导入失败。',
+]
 
 function normalizeKnownFriendGidSyncCooldownSec(input: unknown, fallback = 600) {
   const value = Number.parseInt(String(input ?? ''), 10)
@@ -352,7 +366,7 @@ async function handleImportSyncAllHex() {
 
   const hex = String(syncAllHexInput.value || '').trim()
   if (!hex) {
-    toastStore.error('请先粘贴 SyncAll 请求包十六进制')
+    toastStore.error('请先粘贴好友同步请求的 16 进制 Hex 数据')
     return
   }
 
@@ -640,11 +654,11 @@ function formatSyncAllImportTime(timestamp: number) {
                 ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
                 : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300'"
             >
-              {{ hasImportedSyncAllOpenIds ? `已导入 ${syncAllImportStatus.openIdCount}` : '未导入同步数据' }}
+              {{ hasImportedSyncAllOpenIds ? `已导入 ${syncAllImportStatus.openIdCount}` : '未导入 Hex 数据' }}
             </span>
           </div>
           <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            QQ 新好友接口依赖已知 GID 和手动导入的好友同步数据。默认收起，展开后再维护。
+            QQ 新好友接口依赖已知 GID 和手动导入的好友同步 Hex 数据。默认收起，展开后再维护。
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400" @click.stop>
@@ -738,7 +752,7 @@ function formatSyncAllImportTime(timestamp: number) {
               <div class="flex items-center gap-2">
                 <div class="i-carbon-document-import text-lg text-amber-500" />
                 <h4 class="text-base text-gray-700 font-semibold dark:text-gray-200">
-                  手动导入好友同步数据
+                  手动导入好友同步 Hex 数据
                 </h4>
                 <span
                   class="rounded-full px-2 py-0.5 text-xs"
@@ -746,14 +760,21 @@ function formatSyncAllImportTime(timestamp: number) {
                     ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
                     : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300'"
                 >
-                  {{ hasImportedSyncAllOpenIds ? `已导入 ${syncAllImportStatus.openIdCount}` : '未导入' }}
+                  {{ hasImportedSyncAllOpenIds ? `已导入 ${syncAllImportStatus.openIdCount}` : '未导入 Hex 数据' }}
                 </span>
               </div>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                这是一个高级功能。请粘贴抓包工具里获取到的 QQ 农场好友同步数据，系统会自动解析并尝试补全好友列表。
+                这是一个高级功能。请粘贴 QQ 农场 WSS 中好友同步发包的 16 进制 Hex 数据，目标请求为 gamepb.friendpb.FriendService / SyncAll，系统会自动解析并尝试补全好友列表。
               </p>
             </div>
             <div class="flex items-center gap-2">
+              <BaseButton
+                variant="outline"
+                size="sm"
+                @click="showSyncAllHelpModal = true"
+              >
+                如何找到正确的数据？
+              </BaseButton>
               <BaseButton
                 variant="outline"
                 size="sm"
@@ -829,14 +850,14 @@ function formatSyncAllImportTime(timestamp: number) {
             <BaseTextarea
               v-model="syncAllHexInput"
               :rows="4"
-              label="好友同步数据"
-              placeholder="请粘贴抓包工具中导出的好友同步数据，支持空格和换行"
+              label="好友同步请求 Hex 数据"
+              placeholder="请粘贴 WSS 中 FriendService.SyncAll 发包的 16 进制 Hex 数据，支持空格和换行"
               :disabled="syncAllImportSaving"
             />
           </div>
 
           <div class="mt-3 rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-500 dark:bg-gray-900/40 dark:text-gray-400">
-            导入只和当前账号绑定。导错数据不会覆盖你之前已经保存的导入结果；如果好友关系有变化，需要重新导入最新的同步数据。
+            只支持导入发包，不支持回包。导入只和当前账号绑定；导错数据不会覆盖你之前已经保存的导入结果；如果好友关系有变化，需要重新导入最新的 Hex 数据。
           </div>
         </div>
       </div>
@@ -1109,5 +1130,73 @@ function formatSyncAllImportTime(timestamp: number) {
       @confirm="onConfirm"
       @cancel="!confirmLoading && (showConfirm = false)"
     />
+
+    <div
+      v-if="showSyncAllHelpModal"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+      @click="showSyncAllHelpModal = false"
+    >
+      <div class="max-h-[85vh] max-w-2xl w-full overflow-y-auto rounded-xl bg-white p-6 shadow-2xl dark:bg-gray-800" @click.stop>
+        <h3 class="text-xl text-gray-900 font-bold dark:text-gray-100">
+          如何找到正确的 Hex 数据
+        </h3>
+        <p class="mt-3 text-sm text-gray-600 leading-relaxed dark:text-gray-400">
+          请在抓包工具中查看 QQ 农场小程序的 WSS 通信，并找到好友同步请求的 16 进制 Hex 数据。
+        </p>
+
+        <div class="mt-4 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
+          只支持导入发包，不支持回包。
+        </div>
+
+        <div class="mt-4">
+          <div class="text-sm text-gray-700 font-medium dark:text-gray-200">
+            目标请求
+          </div>
+          <div class="mt-2 rounded-lg bg-gray-50 px-4 py-3 text-sm text-gray-700 font-mono dark:bg-gray-900/40 dark:text-gray-200">
+            gamepb.friendpb.FriendService / SyncAll
+          </div>
+        </div>
+
+        <div class="mt-4">
+          <div class="text-sm text-gray-700 font-medium dark:text-gray-200">
+            快速识别特征
+          </div>
+          <ul class="mt-2 text-sm text-gray-600 space-y-2 dark:text-gray-400">
+            <li
+              v-for="item in syncAllHelpRecognizeList"
+              :key="item"
+              class="rounded-lg bg-gray-50 px-4 py-3 leading-relaxed dark:bg-gray-900/40"
+            >
+              {{ item }}
+            </li>
+          </ul>
+        </div>
+
+        <div class="mt-4">
+          <div class="text-sm text-gray-700 font-medium dark:text-gray-200">
+            常见错误
+          </div>
+          <ul class="mt-2 text-sm text-gray-600 space-y-2 dark:text-gray-400">
+            <li
+              v-for="item in syncAllHelpWrongList"
+              :key="item"
+              class="rounded-lg bg-gray-50 px-4 py-3 leading-relaxed dark:bg-gray-900/40"
+            >
+              {{ item }}
+            </li>
+          </ul>
+        </div>
+
+        <div class="mt-4 rounded-lg bg-gray-50 px-4 py-3 text-sm text-gray-500 dark:bg-gray-900/40 dark:text-gray-400">
+          导错数据不会覆盖之前已经成功保存的导入结果。
+        </div>
+
+        <div class="mt-6 flex justify-end">
+          <BaseButton variant="primary" @click="showSyncAllHelpModal = false">
+            我知道了
+          </BaseButton>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
