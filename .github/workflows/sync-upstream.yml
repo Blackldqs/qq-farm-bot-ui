@@ -1,0 +1,292 @@
+name: Sync upstream (hourly)
+
+on:
+  schedule:
+    # Every hour
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+env:
+  REGISTRY: docker.io
+  # TODO: change to your Docker Hub repo/name, e.g. "yourname/qq-farm-bot-ui"
+  IMAGE_NAME: ldqs365/qq-farm-bot-ui
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      updated: ${{ steps.sync.outputs.updated }}
+      merge_sha: ${{ steps.sync.outputs.merge_sha }}
+    steps:
+      - name: Sync fork from upstream
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_BRANCH: main
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Syncing '${GITHUB_REPOSITORY}' from upstream branch '${UPSTREAM_BRANCH}'..."
+
+          # This uses GitHub's native 'Sync fork' API.
+          # - Success with updates: HTTP 200 and a JSON body
+          # - Already up-to-date: HTTP 204 and empty body
+          # - Diverged / conflicts: HTTP 409
+          # Docs: POST /repos/{owner}/{repo}/merge-upstream
+          resp=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/merge-upstream" -f "branch=${UPSTREAM_BRANCH}" -i 2>&1) || {
+            echo "$resp"
+            echo "Sync failed. If your fork has local commits that diverge from upstream, you may need to reset/rebase or sync manually." >&2
+            exit 1
+          }
+
+          status=$(printf '%s\n' "$resp" | head -n 1 | awk '{print $2}')
+
+          if [ "$status" = "204" ]; then
+            echo "Already up to date (no upstream commits to merge)."
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            echo "merge_sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Sync completed with HTTP status: $status"
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+
+          # Extract response body (after headers)
+          body="$(printf '%s\n' "$resp" | awk 'BEGIN{h=1} {if(h && $0=="" ){h=0; next} if(!h) print}')"
+          if [ -n "$body" ]; then
+            echo "$body" | sed -n '1,200p'
+          fi
+
+          # Capture the exact merge commit SHA for deterministic downstream builds
+          merge_sha="$(printf '%s' "$body" | jq -r '.merge_commit_sha // empty' || true)"
+          echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+
+  prepare-tags:
+    name: Prepare shared tags
+    runs-on: ubuntu-latest
+    needs: sync
+    if: needs.sync.outputs.updated == 'true'
+    permissions:
+      contents: read
+    outputs:
+      release_date: ${{ steps.tags.outputs.release_date }}
+      short_sha: ${{ steps.tags.outputs.short_sha }}
+      source_sha: ${{ steps.tags.outputs.source_sha }}
+    steps:
+      - name: Checkout (latest main)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.merge_sha || 'main' }}
+          fetch-depth: 0
+
+      - name: Compute tags from HEAD
+        id: tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_date="$(git log -1 --format=%cs)"  # YYYY-MM-DD
+          short_sha="$(git rev-parse --short=7 HEAD)"
+          source_sha="$(git rev-parse HEAD)"
+          echo "release_date=$release_date" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+  docker-amd64:
+    name: Build Docker linux/amd64
+    runs-on: ubuntu-latest
+    needs: prepare-tags
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (latest main)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-tags.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./core/Dockerfile
+          platforms: linux/amd64
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Export amd64 digest
+        shell: bash
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" | sed 's/^sha256://' > /tmp/digests/amd64
+
+      - name: Upload amd64 digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-amd64
+          path: /tmp/digests/amd64
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-arm64:
+    name: Build Docker linux/arm64
+    runs-on: ubuntu-24.04-arm
+    needs: prepare-tags
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (latest main)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-tags.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./core/Dockerfile
+          platforms: linux/arm64
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Export arm64 digest
+        shell: bash
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" | sed 's/^sha256://' > /tmp/digests/arm64
+
+      - name: Upload arm64 digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-arm64
+          path: /tmp/digests/arm64
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-armv7:
+    name: Build Docker linux/arm/v7
+    runs-on: ubuntu-latest
+    needs: prepare-tags
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (latest main)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-tags.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./core/Dockerfile
+          platforms: linux/arm/v7
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Export armv7 digest
+        shell: bash
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" | sed 's/^sha256://' > /tmp/digests/armv7
+
+      - name: Upload armv7 digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-armv7
+          path: /tmp/digests/armv7
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-manifests:
+    name: Publish Docker manifests (Linux)
+    runs-on: ubuntu-latest
+    needs:
+      - prepare-tags
+      - docker-amd64
+      - docker-arm64
+      - docker-armv7
+    permissions:
+      contents: read
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Publish latest + tags from digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          sources=""
+          for f in /tmp/digests/*; do
+            d="sha256:$(cat "$f")"
+            sources="$sources ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@$d"
+          done
+
+          docker buildx imagetools create \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare-tags.outputs.release_date }} \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ needs.prepare-tags.outputs.short_sha }} \
+            $sources
+
+      - name: Inspect latest manifest
+        run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
