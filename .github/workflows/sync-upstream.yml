@@ -1,8 +1,8 @@
-name: Sync upstream (hourly)
+name: Sync upstream every 6 hours and build Docker
 
 on:
   schedule:
-    # Every 6 hours
+    # 每 6 小时整点跑一次
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
@@ -11,105 +11,123 @@ env:
   # TODO: change to your Docker Hub repo/name, e.g. "yourname/qq-farm-bot-ui"
   IMAGE_NAME: ldqs365/qq-farm-bot-ui
 
+# 避免上一次还没跑完又开始下一次
 concurrency:
   group: sync-upstream
   cancel-in-progress: false
 
+permissions:
+  contents: write
+
 jobs:
-  sync:
+  sync-fork:
+    name: Check upstream and sync fork
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     outputs:
       updated: ${{ steps.sync.outputs.updated }}
-      merge_sha: ${{ steps.sync.outputs.merge_sha }}
+      branch: ${{ steps.sync.outputs.branch }}
     steps:
-      - name: Sync fork from upstream
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect upstream and sync if needed
         id: sync
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          UPSTREAM_BRANCH: main
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Syncing '${GITHUB_REPOSITORY}' from upstream branch '${UPSTREAM_BRANCH}'..."
+          repo="$GITHUB_REPOSITORY"
 
-          # This uses GitHub's native 'Sync fork' API.
-          # - Success with updates: HTTP 200 and a JSON body
-          # - Already up-to-date: HTTP 204 and empty body
-          # - Diverged / conflicts: HTTP 409
-          # Docs: POST /repos/{owner}/{repo}/merge-upstream
-          resp=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/merge-upstream" -f "branch=${UPSTREAM_BRANCH}" -i 2>&1) || {
-            echo "$resp"
-            echo "Sync failed. If your fork has local commits that diverge from upstream, you may need to reset/rebase or sync manually." >&2
-            exit 1
-          }
-
-          status=$(printf '%s\n' "$resp" | head -n 1 | awk '{print $2}')
-
-          if [ "$status" = "204" ]; then
-            echo "Already up to date (no upstream commits to merge)."
+          # 读取 fork 的上游仓库信息（如果不是 fork，就直接退出）
+          parent_full="$(gh api "repos/$repo" --jq '.parent.full_name // empty')"
+          if [ -z "$parent_full" ]; then
+            echo "This repository is not a fork; skip sync."
             echo "updated=false" >> "$GITHUB_OUTPUT"
-            echo "merge_sha=" >> "$GITHUB_OUTPUT"
+            echo "branch=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "Sync completed with HTTP status: $status"
-          echo "updated=true" >> "$GITHUB_OUTPUT"
+          branch="$(gh api "repos/$repo" --jq '.default_branch')"
+          fork_owner="${repo%%/*}"
+          upstream_owner="${parent_full%%/*}"
 
-          # Extract response body (after headers)
-          body="$(printf '%s\n' "$resp" | awk 'BEGIN{h=1} {if(h && $0=="" ){h=0; next} if(!h) print}')"
-          if [ -n "$body" ]; then
-            echo "$body" | sed -n '1,200p'
+          echo "Upstream: $parent_full"
+          echo "Branch: $branch"
+
+          # 对比 fork 分支与 upstream 分支：
+          # base = fork_owner:branch
+          # head = upstream_owner:branch
+          compare_url="repos/$parent_full/compare/$fork_owner:$branch...$upstream_owner:$branch"
+          status="$(gh api "$compare_url" --jq '.status')"
+          ahead_by="$(gh api "$compare_url" --jq '.ahead_by')"
+
+          echo "compare status=$status ahead_by=$ahead_by"
+
+          if [ "$status" != "ahead" ] || [ "$ahead_by" -eq 0 ]; then
+            echo "No upstream updates; skip."
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            echo "branch=$branch" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          # Capture the exact merge commit SHA for deterministic downstream builds
-          merge_sha="$(printf '%s' "$body" | jq -r '.merge_commit_sha // empty' || true)"
-          echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+          echo "Upstream updated; syncing fork..."
+
+          # 使用 GitHub 官方 merge-upstream API 同步 fork
+          # https://docs.github.com/en/rest/branches/branches#merge-upstream
+          gh api -X POST "repos/$repo/merge-upstream" -f branch="$branch" >/dev/null
+
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
   prepare-tags:
     name: Prepare shared tags
     runs-on: ubuntu-latest
-    needs: sync
-    if: needs.sync.outputs.updated == 'true'
-    permissions:
-      contents: read
+    needs: sync-fork
+    if: needs.sync-fork.outputs.updated == 'true'
     outputs:
-      release_date: ${{ steps.tags.outputs.release_date }}
-      short_sha: ${{ steps.tags.outputs.short_sha }}
-      source_sha: ${{ steps.tags.outputs.source_sha }}
+      release_date: ${{ steps.tag.outputs.value }}
     steps:
-      - name: Checkout (latest main)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.sync.outputs.merge_sha || 'main' }}
-          fetch-depth: 0
+          ref: ${{ needs.sync-fork.outputs.branch }}
 
-      - name: Compute tags from HEAD
-        id: tags
+      - name: Read release date tag from Update.log first line
+        id: tag
         shell: bash
         run: |
           set -euo pipefail
-          release_date="$(git log -1 --format=%cs)"  # YYYY-MM-DD
-          short_sha="$(git rev-parse --short=7 HEAD)"
-          source_sha="$(git rev-parse HEAD)"
-          echo "release_date=$release_date" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
-          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+          first_line="$(sed -n '1p' Update.log | tr -d '\r')"
+          date_raw="$(echo "$first_line" | grep -oE '[0-9]{4}/[0-9]{2}/[0-9]{2}' | head -n 1)"
+
+          if [ -z "$date_raw" ]; then
+            echo "Could not find date like YYYY/MM/DD in Update.log line 1"
+            exit 1
+          fi
+
+          # Docker tags cannot contain '/'; convert to YYYY-MM-DD.
+          date_tag="${date_raw//\//-}"
+          echo "value=$date_tag" >> "$GITHUB_OUTPUT"
 
   docker-amd64:
     name: Build Docker linux/amd64
     runs-on: ubuntu-latest
-    needs: prepare-tags
+    needs:
+      - sync-fork
+      - prepare-tags
+    if: needs.prepare-tags.result == 'success'
     permissions:
       contents: read
     steps:
-      - name: Checkout (latest main)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare-tags.outputs.source_sha }}
-          fetch-depth: 0
+          ref: ${{ needs.sync-fork.outputs.branch }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -151,15 +169,17 @@ jobs:
   docker-arm64:
     name: Build Docker linux/arm64
     runs-on: ubuntu-24.04-arm
-    needs: prepare-tags
+    needs:
+      - sync-fork
+      - prepare-tags
+    if: needs.prepare-tags.result == 'success'
     permissions:
       contents: read
     steps:
-      - name: Checkout (latest main)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare-tags.outputs.source_sha }}
-          fetch-depth: 0
+          ref: ${{ needs.sync-fork.outputs.branch }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -198,15 +218,17 @@ jobs:
   docker-armv7:
     name: Build Docker linux/arm/v7
     runs-on: ubuntu-latest
-    needs: prepare-tags
+    needs:
+      - sync-fork
+      - prepare-tags
+    if: needs.prepare-tags.result == 'success'
     permissions:
       contents: read
     steps:
-      - name: Checkout (latest main)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare-tags.outputs.source_sha }}
-          fetch-depth: 0
+          ref: ${{ needs.sync-fork.outputs.branch }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -253,6 +275,7 @@ jobs:
       - docker-amd64
       - docker-arm64
       - docker-armv7
+    if: needs.prepare-tags.result == 'success'
     permissions:
       contents: read
     steps:
@@ -272,10 +295,11 @@ jobs:
           pattern: digests-*
           merge-multiple: true
 
-      - name: Publish latest + tags from digests
+      - name: Publish latest and release-date manifests from digests
         shell: bash
         run: |
           set -euo pipefail
+
           sources=""
           for f in /tmp/digests/*; do
             d="sha256:$(cat "$f")"
@@ -285,8 +309,10 @@ jobs:
           docker buildx imagetools create \
             -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
             -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare-tags.outputs.release_date }} \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ needs.prepare-tags.outputs.short_sha }} \
             $sources
 
       - name: Inspect latest manifest
         run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Inspect release-date manifest
+        run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare-tags.outputs.release_date }}
