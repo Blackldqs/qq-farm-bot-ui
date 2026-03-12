@@ -25,6 +25,7 @@ const { currentAccountId, currentAccount } = storeToRefs(accountStore)
 const { dashboardItems } = storeToRefs(bagStore)
 const logContainer = ref<HTMLElement | null>(null)
 const autoScroll = ref(true)
+const LOG_AUTO_SCROLL_THRESHOLD = 24
 const lastBagFetchAt = ref(0)
 const clearLogsLoading = ref(false)
 const clearLogsConfirmVisible = ref(false)
@@ -409,6 +410,7 @@ async function executeClearLogs() {
 }
 
 watch(currentAccountId, () => {
+  autoScroll.value = true
   refresh(true)
 })
 
@@ -432,22 +434,36 @@ function onLogScroll(e: Event) {
   const el = e.target as HTMLElement
   if (!el)
     return
-  const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50
-  autoScroll.value = isNearBottom
+  autoScroll.value = isLogScrollAtBottom(el)
+}
+
+function isLogScrollAtBottom(el: HTMLElement | null) {
+  if (!el)
+    return true
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= LOG_AUTO_SCROLL_THRESHOLD
+}
+
+function scrollLogsToBottom(force = false) {
+  nextTick(() => {
+    const el = logContainer.value
+    if (!el)
+      return
+    if (!force && !autoScroll.value)
+      return
+    el.scrollTop = el.scrollHeight
+    autoScroll.value = true
+  })
 }
 
 // Auto scroll logs
 watch(allLogs, () => {
-  nextTick(() => {
-    if (logContainer.value && autoScroll.value) {
-      logContainer.value.scrollTop = logContainer.value.scrollHeight
-    }
-  })
+  scrollLogsToBottom()
 }, { deep: true })
 
 onMounted(() => {
   statusStore.setRealtimeLogsEnabled(!hasActiveLogFilter.value)
   refresh()
+  scrollLogsToBottom(true)
 })
 
 // Auto refresh fallback every 10s (WS 断开或筛选条件启用时会回退 HTTP)
