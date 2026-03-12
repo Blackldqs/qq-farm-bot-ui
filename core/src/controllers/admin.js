@@ -588,18 +588,6 @@ function startAdminServer(dataProvider) {
         }
     });
 
-    // API: 好友缓存
-    app.get('/api/friend-cache', async (req, res) => {
-        const id = getAccId(req);
-        if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
-        try {
-            const list = store.getFriendCache ? store.getFriendCache(id) : [];
-            return res.json({ ok: true, data: Array.isArray(list) ? list : [] });
-        } catch (e) {
-            return handleApiError(res, e);
-        }
-    });
-
     app.post('/api/friend-known-gids', (req, res) => {
         const id = getAccId(req);
         if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
@@ -616,27 +604,6 @@ function startAdminServer(dataProvider) {
             }
             broadcastAccountConfig(id);
             return res.json({ ok: true, data: buildKnownFriendGidSettings(id) });
-        } catch (e) {
-            return handleApiError(res, e);
-        }
-    });
-
-    app.post('/api/friend-cache/update-from-visitors', async (req, res) => {
-        const id = getAccId(req);
-        if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
-        try {
-            if (!provider || typeof provider.extractFriendsFromInteractRecords !== 'function') {
-                return res.status(501).json({ ok: false, error: '当前运行时不支持从最近访客提取好友缓存' });
-            }
-            const friends = await provider.extractFriendsFromInteractRecords(id);
-            if (!Array.isArray(friends) || friends.length === 0) {
-                return res.json({ ok: true, data: store.getFriendCache ? store.getFriendCache(id) : [], message: '没有找到新的访客记录' });
-            }
-            const saved = store.updateFriendCache ? store.updateFriendCache(id, friends) : friends;
-            if (provider && typeof provider.broadcastConfig === 'function') {
-                provider.broadcastConfig(id);
-            }
-            return res.json({ ok: true, data: saved, message: '更新成功' });
         } catch (e) {
             return handleApiError(res, e);
         }
@@ -665,38 +632,6 @@ function startAdminServer(dataProvider) {
         }
     });
 
-    app.post('/api/friend-cache/import-gids', (req, res) => {
-        const id = getAccId(req);
-        if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
-        try {
-            const input = req.body.gids;
-            let gids = [];
-            if (typeof input === 'string') {
-                gids = input.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean);
-            } else if (Array.isArray(input)) {
-                gids = input;
-            }
-            const validGids = gids
-                .map(g => Number(g))
-                .filter(g => Number.isFinite(g) && g > 0);
-            if (validGids.length === 0) {
-                return res.json({ ok: false, error: '没有有效的 GID' });
-            }
-            const friends = validGids.map(gid => ({
-                gid,
-                nick: `GID:${gid}`,
-                avatarUrl: '',
-            }));
-            const saved = store.updateFriendCache ? store.updateFriendCache(id, friends) : friends;
-            if (provider && typeof provider.broadcastConfig === 'function') {
-                provider.broadcastConfig(id);
-            }
-            return res.json({ ok: true, data: saved, message: `已导入 ${validGids.length} 个 GID` });
-        } catch (e) {
-            return handleApiError(res, e);
-        }
-    });
-
     app.post('/api/friend-known-gids/remove', (req, res) => {
         const id = getAccId(req);
         if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
@@ -712,26 +647,6 @@ function startAdminServer(dataProvider) {
             }
             broadcastAccountConfig(id);
             return res.json({ ok: true, data: buildKnownFriendGidSettings(id) });
-        } catch (e) {
-            return handleApiError(res, e);
-        }
-    });
-
-    app.delete('/api/friend-cache/:gid', (req, res) => {
-        const id = getAccId(req);
-        if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
-        const gid = Number(req.params.gid);
-        if (!gid || !Number.isFinite(gid)) {
-            return res.status(400).json({ ok: false, error: '无效的 GID' });
-        }
-        try {
-            const current = store.getFriendCache ? store.getFriendCache(id) : [];
-            const next = current.filter(f => f.gid !== gid);
-            const saved = store.setFriendCache ? store.setFriendCache(id, next) : next;
-            if (provider && typeof provider.broadcastConfig === 'function') {
-                provider.broadcastConfig(id);
-            }
-            return res.json({ ok: true, data: saved, message: `已删除 GID:${gid}` });
         } catch (e) {
             return handleApiError(res, e);
         }
