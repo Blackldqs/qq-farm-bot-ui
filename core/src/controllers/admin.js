@@ -1126,7 +1126,7 @@ function startAdminServer(dataProvider) {
 
             const incomingCode = String(payload.code || '').trim();
             const manualPlatform = String(payload.platform || (oldAccount && oldAccount.platform) || 'qq').trim().toLowerCase();
-            if (incomingCode) {
+            if (incomingCode && manualPlatform === 'qq') {
                 try {
                     const basicProfile = await fetchProfileByCode(incomingCode, {
                         platform: manualPlatform,
