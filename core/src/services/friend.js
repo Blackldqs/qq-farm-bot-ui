@@ -747,7 +747,7 @@ async function pruneNpcQqFriendsDuringMaintenance(reason = 'maintenance') {
 }
 
 async function fetchQqFriendsByKnownGids() {
-    if (!types.GetGameFriendsRequest || !types.GetAllFriendsReply) {
+    if (!types.GetGameFriendsRequest || !types.GetGameFriendsReply) {
         throw new Error('GetGameFriends 接口类型未加载');
     }
 
@@ -764,7 +764,7 @@ async function fetchQqFriendsByKnownGids() {
         })).finish();
         try {
             const { body: replyBody } = await sendMsgAsync('gamepb.friendpb.FriendService', 'GetGameFriends', body);
-            const reply = types.GetAllFriendsReply.decode(replyBody);
+            const reply = types.GetGameFriendsReply.decode(replyBody);
             const rawBatchFriends = extractReplyFriends(reply);
             const { normalFriends: batchFriends, npcFriends } = splitNpcQqFriends(rawBatchFriends);
             syncAutoPrunedNpcConfig(npcFriends, 'get_game_friends');
@@ -1309,6 +1309,8 @@ async function getFriendLandsDetail(friendGid) {
                     plantName: '',
                     phaseName: '未解锁',
                     level,
+                    currentSeason: 0,
+                    totalSeason: 0,
                     needWater: false,
                     needWeed: false,
                     needBug: false,
@@ -1328,6 +1330,8 @@ async function getFriendLandsDetail(friendGid) {
                     plantName: '',
                     phaseName: '空地',
                     level,
+                    currentSeason: 0,
+                    totalSeason: 0,
                     occupiedByMaster,
                     masterLandId,
                     occupiedLandIds,
@@ -1344,6 +1348,8 @@ async function getFriendLandsDetail(friendGid) {
                     plantName: '',
                     phaseName: '',
                     level,
+                    currentSeason: 0,
+                    totalSeason: 0,
                     occupiedByMaster,
                     masterLandId,
                     occupiedLandIds,
@@ -1358,6 +1364,9 @@ async function getFriendLandsDetail(friendGid) {
             const seedId = toNum(plantCfg && plantCfg.seed_id);
             const seedImage = seedId > 0 ? getSeedImageBySeedId(seedId) : '';
             const plantSize = Math.max(1, toNum(plantCfg && plantCfg.size) || 1);
+            const totalSeason = Math.max(1, toNum(plantCfg && plantCfg.seasons) || 1);
+            const currentSeasonRaw = toNum(plant.season);
+            const currentSeason = currentSeasonRaw > 0 ? Math.min(currentSeasonRaw, totalSeason) : 1;
             const phaseName = PHASE_NAMES[phaseVal] || '';
             const maturePhase = Array.isArray(plant.phases)
                 ? plant.phases.find((p) => p && toNum(p.phase) === PlantPhase.MATURE)
@@ -1377,6 +1386,8 @@ async function getFriendLandsDetail(friendGid) {
                 seedImage,
                 phaseName,
                 level,
+                currentSeason,
+                totalSeason,
                 matureInSec,
                 needWater: toNum(plant.dry_num) > 0,
                 needWeed: (plant.weed_owners && plant.weed_owners.length > 0),

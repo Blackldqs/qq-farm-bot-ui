@@ -181,6 +181,7 @@ const globalConfig = {
     qrLogin: { ...DEFAULT_QR_LOGIN },
     runtimeClient: { ...DEFAULT_RUNTIME_CLIENT, device_info: { ...DEFAULT_RUNTIME_CLIENT.device_info } },
     adminPasswordHash: '',
+    disablePasswordAuth: false,
 };
 
 function normalizeOfflineReminder(input) {
@@ -405,7 +406,6 @@ function normalizeBagSeedFallbackStrategy(input, fallback = DEFAULT_ACCOUNT_CONF
     if (ALLOWED_BAG_SEED_FALLBACK_STRATEGIES.includes(strategy)) return strategy;
     return fallback;
 }
-
 function normalizeFertilizerBuyAutomation(automation) {
     const next = (automation && typeof automation === 'object') ? automation : {};
     const mode = String(next.fertilizer_buy_mode || '').trim().toLowerCase();
@@ -417,6 +417,9 @@ function normalizeFertilizerBuyAutomation(automation) {
 }
 
 function cloneAccountConfig(base = DEFAULT_ACCOUNT_CONFIG) {
+    const { friendCache: _friendCache, ...restBase } = (base && typeof base === 'object')
+        ? base
+        : DEFAULT_ACCOUNT_CONFIG;
     const srcAutomation = (base && base.automation && typeof base.automation === 'object')
         ? base.automation
         : {};
@@ -436,7 +439,7 @@ function cloneAccountConfig(base = DEFAULT_ACCOUNT_CONFIG) {
 
     const rawBlacklist = Array.isArray(base.friendBlacklist) ? base.friendBlacklist : [];
     return {
-        ...base,
+        ...restBase,
         automation,
         intervals: { ...(base.intervals || DEFAULT_ACCOUNT_CONFIG.intervals) },
         friendQuietHours: { ...(base.friendQuietHours || DEFAULT_ACCOUNT_CONFIG.friendQuietHours) },
@@ -661,6 +664,9 @@ function loadGlobalConfig() {
             if (typeof data.adminPasswordHash === 'string') {
                 globalConfig.adminPasswordHash = data.adminPasswordHash;
             }
+            if (typeof data.disablePasswordAuth === 'boolean') {
+                globalConfig.disablePasswordAuth = data.disablePasswordAuth;
+            }
         }
     } catch (e) {
         console.error('加载配置失败:', e.message);
@@ -718,6 +724,16 @@ function setAdminPasswordHash(hash) {
     globalConfig.adminPasswordHash = String(hash || '');
     saveGlobalConfig();
     return globalConfig.adminPasswordHash;
+}
+
+function getDisablePasswordAuth() {
+    return Boolean(globalConfig.disablePasswordAuth);
+}
+
+function setDisablePasswordAuth(disabled) {
+    globalConfig.disablePasswordAuth = Boolean(disabled);
+    saveGlobalConfig();
+    return globalConfig.disablePasswordAuth;
 }
 
 // 初始化加载
@@ -1103,11 +1119,19 @@ function addOrUpdateAccount(acc) {
     } else {
         const id = data.nextId++;
         touchedAccountId = String(id);
+        const defaultName = String(
+            acc.name
+            || acc.nick
+            || (acc.gid ? `GID:${acc.gid}` : '')
+            || '',
+        ).trim() || `账号${id}`;
         data.accounts.push({
             id: touchedAccountId,
-            name: acc.name || `账号${id}`,
+            name: defaultName,
             code: acc.code || '',
             platform: acc.platform || 'qq',
+            gid: acc.gid ? String(acc.gid) : '',
+            openId: acc.openId ? String(acc.openId) : '',
             uin: acc.uin ? String(acc.uin) : '',
             qq: acc.qq ? String(acc.qq) : (acc.uin ? String(acc.uin) : ''),
             avatar: acc.avatar || acc.avatarUrl || '',
@@ -1170,4 +1194,6 @@ module.exports = {
     deleteAccount,
     getAdminPasswordHash,
     setAdminPasswordHash,
+    getDisablePasswordAuth,
+    setDisablePasswordAuth,
 };
