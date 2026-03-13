@@ -58,16 +58,18 @@ jobs:
           echo "Upstream: $parent_full"
           echo "Branch: $branch"
 
-          # 对比 fork 分支与 upstream 分支：
-          # base = fork_owner:branch
-          # head = upstream_owner:branch
-          compare_url="repos/$parent_full/compare/$fork_owner:$branch...$upstream_owner:$branch"
+          # 对比 fork 分支与 upstream(父仓库) 分支：
+          # 需要同步的条件：fork 落后于 upstream，即 behind_by > 0
+          # compare 的方向必须是：base=upstream, head=fork
+          # 这样 behind_by 表示 fork 还差上游多少提交
+          compare_url="repos/$parent_full/compare/$upstream_owner:$branch...$fork_owner:$branch"
           status="$(gh api "$compare_url" --jq '.status')"
           ahead_by="$(gh api "$compare_url" --jq '.ahead_by')"
+          behind_by="$(gh api "$compare_url" --jq '.behind_by')"
 
-          echo "compare status=$status ahead_by=$ahead_by"
+          echo "compare status=$status ahead_by=$ahead_by behind_by=$behind_by"
 
-          if [ "$status" != "ahead" ] || [ "$ahead_by" -eq 0 ]; then
+          if [ "$behind_by" -eq 0 ]; then
             echo "No upstream updates; skip."
             echo "updated=false" >> "$GITHUB_OUTPUT"
             echo "branch=$branch" >> "$GITHUB_OUTPUT"
