@@ -22,6 +22,7 @@ const { sendPushooMessage } = require('../services/push');
 const { getSchedulerRegistrySnapshot } = require('../services/scheduler');
 const { loadProto, types } = require('../utils/proto');
 const cryptoWasm = require('../utils/crypto-wasm');
+const { fetchProfileByCode } = require('../services/manual-login-profile');
 const { 
     hashPassword: secureHash, 
     verifyPassword,
@@ -73,6 +74,11 @@ function startAdminServer(dataProvider) {
 
     const issueToken = () => crypto.randomBytes(24).toString('hex');
     const authRequired = (req, res, next) => {
+        // 检查是否禁用了密码认证
+        if (store.getDisablePasswordAuth && store.getDisablePasswordAuth()) {
+            return next();
+        }
+
         const token = req.headers['x-admin-token'];
         if (!token || !tokens.has(token)) {
             return res.status(401).json({ ok: false, error: 'Unauthorized' });
@@ -108,18 +114,18 @@ function startAdminServer(dataProvider) {
     // 登录与鉴权
     app.post('/api/login', async (req, res) => {
         const { password } = req.body || {};
-        
+
         // 记录登录尝试
         try {
             recordLoginAttempts(req.ip);
         } catch (error) {
             return res.status(429).json({ ok: false, error: error.message });
         }
-        
+
         const input = String(password || '');
         const storedHash = store.getAdminPasswordHash ? store.getAdminPasswordHash() : '';
         let ok = false;
-        
+
         if (storedHash) {
             // 优先使用安全验证 (支持PBKDF2和SHA256)
             ok = await verifyPassword(input, storedHash);
@@ -127,7 +133,7 @@ function startAdminServer(dataProvider) {
             // 兼容旧配置
             ok = input === String(CONFIG.adminPassword || '');
         }
-        
+
         if (!ok) {
             return res.status(401).json({ ok: false, error: 'Invalid password' });
         }
@@ -140,7 +146,7 @@ function startAdminServer(dataProvider) {
     });
 
     app.use('/api', (req, res, next) => {
-        if (req.path === '/login' || req.path === '/qr/create' || req.path === '/qr/check' || req.path === '/auth/validate') return next();
+        if (req.path === '/login' || req.path === '/qr/create' || req.path === '/qr/check' || req.path === '/auth/validate' || req.path === '/admin/password-auth-status') return next();
         return authRequired(req, res, next);
     });
 
@@ -165,17 +171,47 @@ function startAdminServer(dataProvider) {
         res.json({ ok: true });
     });
 
+    // API: 获取密码认证状态
+    app.get('/api/admin/password-auth-status', (req, res) => {
+        try {
+            const disabled = store.getDisablePasswordAuth ? store.getDisablePasswordAuth() : false;
+            res.json({ ok: true, data: { disabled } });
+        } catch (e) {
+            res.status(500).json({ ok: false, error: e.message });
+        }
+    });
+
+    // API: 设置密码认证状态
+    app.post('/api/admin/toggle-password-auth', async (req, res) => {
+        try {
+            const body = req.body || {};
+            const disabled = Boolean(body.disabled);
+
+            if (store.setDisablePasswordAuth) {
+                store.setDisablePasswordAuth(disabled);
+            }
+            res.json({ ok: true, data: { disabled } });
+        } catch (e) {
+            res.status(500).json({ ok: false, error: e.message });
+        }
+    });
+
     app.get('/api/ping', (req, res) => {
         res.json({ ok: true, data: { ok: true, uptime: process.uptime(), version } });
     });
 
     app.get('/api/auth/validate', (req, res) => {
+        // 如果禁用了密码认证，直接返回有效
+        if (store.getDisablePasswordAuth && store.getDisablePasswordAuth()) {
+            return res.json({ ok: true, data: { valid: true, passwordDisabled: true } });
+        }
+
         const token = String(req.headers['x-admin-token'] || '').trim();
         const valid = !!token && tokens.has(token);
         if (!valid) {
             return res.status(401).json({ ok: false, data: { valid: false }, error: 'Unauthorized' });
         }
-        res.json({ ok: true, data: { valid: true } });
+        res.json({ ok: true, data: { valid: true, passwordDisabled: false } });
     });
 
     // API: 调度任务快照（用于调度收敛排查）
@@ -710,7 +746,6 @@ function startAdminServer(dataProvider) {
             return handleApiError(res, e);
         }
     });
-
     // API: 种子列表
     app.get('/api/seeds', async (req, res) => {
         const id = getAccId(req);
@@ -1062,13 +1097,14 @@ function startAdminServer(dataProvider) {
         }
     });
 
-    app.post('/api/accounts', (req, res) => {
+    app.post('/api/accounts', async (req, res) => {
         try {
             const body = (req.body && typeof req.body === 'object') ? req.body : {};
             const isUpdate = !!body.id;
             const resolvedUpdateId = isUpdate ? resolveAccId(body.id) : '';
-            const payload = isUpdate ? { ...body, id: resolvedUpdateId || String(body.id) } : body;
+            const payload = isUpdate ? { ...body, id: resolvedUpdateId || String(body.id) } : { ...body };
             let wasRunning = false;
+            let oldAccount = null;
             if (isUpdate && provider.isAccountRunning) {
                 wasRunning = provider.isAccountRunning(payload.id);
             }
@@ -1077,7 +1113,7 @@ function startAdminServer(dataProvider) {
             let onlyRemarkChanged = false;
             if (isUpdate) {
                 const oldAccounts = provider.getAccounts();
-                const oldAccount = oldAccounts.accounts.find(a => a.id === payload.id);
+                oldAccount = oldAccounts.accounts.find(a => a.id === payload.id) || null;
                 if (oldAccount) {
                     // 检查 payload 中是否只包含 id 和 name 字段
                     const payloadKeys = Object.keys(payload);
@@ -1085,6 +1121,37 @@ function startAdminServer(dataProvider) {
                     if (onlyIdAndName) {
                         onlyRemarkChanged = true;
                     }
+                }
+            }
+
+            const incomingCode = String(payload.code || '').trim();
+            const manualPlatform = String(payload.platform || (oldAccount && oldAccount.platform) || 'qq').trim().toLowerCase();
+            if (incomingCode && manualPlatform === 'qq') {
+                try {
+                    const basicProfile = await fetchProfileByCode(incomingCode, {
+                        platform: manualPlatform,
+                    });
+
+                    if (basicProfile.avatar) {
+                        payload.avatar = basicProfile.avatar;
+                        payload.avatarUrl = basicProfile.avatar;
+                    }
+                    if (basicProfile.gid > 0 && !String(payload.gid || '').trim()) {
+                        payload.gid = String(basicProfile.gid);
+                    }
+                    if (basicProfile.openId && !String(payload.openId || '').trim()) {
+                        payload.openId = basicProfile.openId;
+                    }
+
+                    const incomingName = String(payload.name || '').trim();
+                    if (!incomingName && basicProfile.name) {
+                        payload.name = basicProfile.name;
+                    }
+                } catch (error) {
+                    adminLogger.warn('fetch manual account profile failed', {
+                        error: error.message,
+                        accountId: payload.id || '',
+                    });
                 }
             }
 
