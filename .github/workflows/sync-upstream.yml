@@ -10,6 +10,9 @@ env:
   REGISTRY: docker.io
   # TODO: change to your Docker Hub repo/name, e.g. "yourname/qq-farm-bot-ui"
   IMAGE_NAME: ldqs365/qq-farm-bot-ui
+  # Which upstream repo to sync from (full_name). For fork-of-fork scenarios,
+  # set this to the repo you want to track.
+  UPSTREAM_REPO: DeepFal/qq-farm-bot-ui
 
 # 避免上一次还没跑完又开始下一次
 concurrency:
@@ -46,6 +49,15 @@ jobs:
           parent_full="$(gh api "repos/$repo" --jq '.parent.full_name // empty')"
           if [ -z "$parent_full" ]; then
             echo "This repository is not a fork; skip sync."
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            echo "branch=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 可选：强制只跟踪指定 upstream（解决 fork-of-fork 场景）
+          upstream_target="${UPSTREAM_REPO:-$parent_full}"
+          if [ "$parent_full" != "$upstream_target" ]; then
+            echo "Parent repo is $parent_full, but configured UPSTREAM_REPO is $upstream_target; skip sync to avoid syncing wrong upstream."
             echo "updated=false" >> "$GITHUB_OUTPUT"
             echo "branch=" >> "$GITHUB_OUTPUT"
             exit 0
